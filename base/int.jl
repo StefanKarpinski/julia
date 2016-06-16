@@ -88,8 +88,24 @@ rem(x::Unsigned, y::Signed) = rem(x,unsigned(abs(y)))
 fld(x::Signed, y::Unsigned) = div(x,y)-(signbit(x)&(rem(x,y)!=0))
 fld(x::Unsigned, y::Signed) = div(x,y)-(signbit(y)&(rem(x,y)!=0))
 
+
+"""
+    mod(x, y)
+
+Modulus after flooring division, returning in the range ``[0,y)``, if `y` is positive, or
+``(y,0]`` if `y` is negative.
+
+```julia
+x == fld(x,y)*y + mod(x,y)
+```
+"""
+function mod{T<:Integer}(x::T, y::T)
+    y == -1 && return T(0)   # avoid potential overflow in fld
+    x - fld(x,y)*y
+end
 mod(x::Signed, y::Unsigned) = rem(y+unsigned(rem(x,y)),y)
 mod(x::Unsigned, y::Signed) = rem(y+signed(rem(x,y)),y)
+mod{T<:Unsigned}(x::T, y::T) = rem(x,y)
 
 cld(x::Signed, y::Unsigned) = div(x,y)+(!signbit(x)&(rem(x,y)!=0))
 cld(x::Unsigned, y::Signed) = div(x,y)+(!signbit(y)&(rem(x,y)!=0))
@@ -101,12 +117,6 @@ rem{T<:BitSigned64}(x::T, y::T) = box(T,checked_srem_int(unbox(T,x),unbox(T,y)))
 div{T<:BitUnsigned64}(x::T, y::T) = box(T,checked_udiv_int(unbox(T,x),unbox(T,y)))
 rem{T<:BitUnsigned64}(x::T, y::T) = box(T,checked_urem_int(unbox(T,x),unbox(T,y)))
 
-# x == fld(x,y)*y + mod(x,y)
-mod{T<:Unsigned}(x::T, y::T) = rem(x,y)
-function mod{T<:Integer}(x::T, y::T)
-    y == -1 && return T(0)   # avoid potential overflow in fld
-    x - fld(x,y)*y
- end
 
 # fld(x,y) == div(x,y) - ((x>=0) != (y>=0) && rem(x,y) != 0 ? 1 : 0)
 fld{T<:Unsigned}(x::T, y::T) = div(x,y)
@@ -274,10 +284,6 @@ macro big_str(s)
     :(throw(ArgumentError($message)))
 end
 
-## system word size ##
-
-const WORD_SIZE = convert(Int, Int.size)*8
-
 ## integer promotions ##
 
 promote_rule(::Type{Int8}, ::Type{Int16})   = Int16
@@ -293,7 +299,7 @@ for T in BitSigned_types
         $(sizeof(T) < sizeof(Int) ? Int : T)
 end
 @eval promote_rule{T<:Union{Int8,Int16,Int32}}(::Type{UInt32}, ::Type{T}) =
-    $(WORD_SIZE == 64 ? Int : UInt)
+    $(Core.sizeof(Int) == 8 ? Int : UInt)
 promote_rule(::Type{UInt32}, ::Type{Int64}) = Int64
 promote_rule{T<:BitSigned64}(::Type{UInt64}, ::Type{T}) = UInt64
 promote_rule{T<:Union{UInt32, UInt64}}(::Type{T}, ::Type{Int128}) = Int128
@@ -344,7 +350,7 @@ widemul(x::Number,y::Bool) = x*y
 
 ## wide multiplication, Int128 multiply and divide ##
 
-if WORD_SIZE == 32
+if Core.sizeof(Int) == 4
     function widemul(u::Int64, v::Int64)
         local u0::UInt64, v0::UInt64, w0::UInt64
         local u1::Int64, v1::Int64, w1::UInt64, w2::Int64, t::UInt64

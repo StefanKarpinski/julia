@@ -23,7 +23,7 @@ type MIState
     current_mode
     aborted::Bool
     mode_state
-    kill_buffer::ByteString
+    kill_buffer::String
     previous_key::Array{Char,1}
     key_repeats::Int
 end
@@ -64,7 +64,7 @@ type PromptState <: ModeState
     indent::Int
 end
 
-input_string(s::PromptState) = bytestring(s.input_buffer)
+input_string(s::PromptState) = String(s.input_buffer)
 
 input_string_newlines(s::PromptState) = count(c->(c == '\n'), input_string(s))
 function input_string_newlines_aftercursor(s::PromptState)
@@ -106,7 +106,7 @@ function common_prefix(completions)
         for c in completions
             (i > endof(c) || c[i] != cc) && return ret
         end
-        ret *= string(cc)
+        ret = string(ret, cc)
         i >= endof(c1) && return ret
         i = nexti
         cc, nexti = next(c1, i)
@@ -204,7 +204,7 @@ function refresh_multi_line(termbuf::TerminalBuffer, terminal::UnixTerminal, buf
     write_prompt(termbuf, prompt)
     prompt = prompt_string(prompt)
     # Count the '\n' at the end of the line if the terminal emulator does (specific to DOS cmd prompt)
-    miscountnl = @windows ? (isa(Terminals.pipe_reader(terminal), Base.TTY) && !Base.ispty(Terminals.pipe_reader(terminal))) : false
+    miscountnl = @static is_windows() ? (isa(Terminals.pipe_reader(terminal), Base.TTY) && !Base.ispty(Terminals.pipe_reader(terminal))) : false
     lindent = strwidth(prompt)
 
     # Now go through the buffer line by line
@@ -386,7 +386,7 @@ function edit_move_up(buf::IOBuffer)
     npos = rsearch(buf.data, '\n', position(buf))
     npos == 0 && return false # we're in the first line
     # We're interested in character count, not byte count
-    offset = length(bytestring(buf.data[(npos+1):(position(buf))]))
+    offset = length(String(buf.data[(npos+1):(position(buf))]))
     npos2 = rsearch(buf.data, '\n', npos-1)
     seek(buf, npos2)
     for _ = 1:offset
@@ -407,7 +407,7 @@ end
 function edit_move_down(buf::IOBuffer)
     npos = rsearch(buf.data[1:buf.size], '\n', position(buf))
     # We're interested in character count, not byte count
-    offset = length(bytestring(buf.data[(npos+1):(position(buf))]))
+    offset = length(String(buf.data[(npos+1):(position(buf))]))
     npos2 = search(buf.data[1:buf.size], '\n', position(buf)+1)
     if npos2 == 0 #we're in the last line
         return false
@@ -624,7 +624,7 @@ function write_prompt(terminal, p::Prompt)
     write(terminal, Base.text_colors[:normal])
     write(terminal, suffix)
 end
-write_prompt(terminal, s::ByteString) = write(terminal, s)
+write_prompt(terminal, s::String) = write(terminal, s)
 
 ### Keymap Support
 
@@ -703,11 +703,11 @@ end
 # This is different from the default eager redirect, which only looks at the current and lower
 # layers of the stack.
 immutable KeyAlias
-    seq::ASCIIString
+    seq::String
     KeyAlias(seq) = new(normalize_key(seq))
 end
 
-match_input(k::Function, s, term, cs, keymap) = (update_key_repeats(s, cs); return keymap_fcn(k, ByteString(cs)))
+match_input(k::Function, s, term, cs, keymap) = (update_key_repeats(s, cs); return keymap_fcn(k, String(cs)))
 match_input(k::Void, s, term, cs, keymap) = (s,p) -> return :ok
 match_input(k::KeyAlias, s, term, cs, keymap) = match_input(keymap, s, IOBuffer(k.seq), Char[], keymap)
 function match_input(k::Dict, s, term=terminal(s), cs=Char[], keymap = k)
@@ -854,7 +854,7 @@ function keymap_merge(target,source)
     for key in setdiff(keys(source), keys(direct_keys))
         # We first resolve redirects in the source
         value = source[key]
-        visited = Array(Any,0)
+        visited = Array{Any}(0)
         while isa(value, Union{Char,AbstractString})
             value = normalize_key(value)
             if value in visited
@@ -909,7 +909,7 @@ function keymap{D<:Dict}(keymaps::Array{D})
 end
 
 const escape_defaults = merge!(
-    AnyDict([Char(i) => nothing for i=vcat(1:26, 28:31)]), # Ignore control characters by default
+    AnyDict(Char(i) => nothing for i=vcat(1:26, 28:31)), # Ignore control characters by default
     AnyDict( # And ignore other escape sequences by default
         "\e*" => nothing,
         "\e[*" => nothing,
@@ -941,9 +941,9 @@ const escape_defaults = merge!(
         "\eOF"  => KeyAlias("\e[F"),
     ),
     # set mode commands
-    AnyDict(["\e[$(c)h" => nothing for c in 1:20]),
+    AnyDict("\e[$(c)h" => nothing for c in 1:20),
     # reset mode commands
-    AnyDict(["\e[$(c)l" => nothing for c in 1:20])
+    AnyDict("\e[$(c)l" => nothing for c in 1:20)
     )
 
 function write_response_buffer(s::PromptState, data)
@@ -986,7 +986,7 @@ function history_set_backward(s::SearchState, backward)
     s.backward = backward
 end
 
-input_string(s::SearchState) = bytestring(s.query_buffer)
+input_string(s::SearchState) = String(s.query_buffer)
 
 function reset_state(s::SearchState)
     if s.query_buffer.size != 0
@@ -1013,7 +1013,7 @@ init_state(terminal, p::HistoryPrompt) = SearchState(terminal, p, true, IOBuffer
 type PrefixSearchState <: ModeState
     terminal
     histprompt
-    prefix::ByteString
+    prefix::String
     response_buffer::IOBuffer
     ias::InputAreaState
     indent::Int
@@ -1035,7 +1035,7 @@ refresh_multi_line(termbuf::TerminalBuffer, terminal::UnixTerminal,
     s::Union{PromptState,PrefixSearchState}) = s.ias =
     refresh_multi_line(termbuf, terminal, buffer(s), s.ias, s, indent = s.indent)
 
-input_string(s::PrefixSearchState) = bytestring(s.response_buffer)
+input_string(s::PrefixSearchState) = String(s.response_buffer)
 
 # a meta-prompt that presents itself as parent_prompt, but which has an independent keymap
 # for prefix searching
@@ -1153,7 +1153,7 @@ function enter_prefix_search(s::MIState, p::PrefixHistoryPrompt, backward::Bool)
         pss = state(s, p)
         pss.parent = parent
         pss.histprompt.parent_prompt = parent
-        pss.prefix = bytestring(pointer(buf.data), position(buf))
+        pss.prefix = String(buf.data[1:position(buf)])
         copybuf!(pss.response_buffer, buf)
         pss.indent = state(s, parent).indent
         pss.mi = s
@@ -1325,11 +1325,11 @@ AnyDict(
         i = position(buf)
         if i != 0
             c = buf.data[i]
-            if c == '\n' || c == '\t' ||
+            if c == UInt8('\n') || c == UInt8('\t') ||
                # hack to allow path completion in cmds
                # after a space, e.g., `cd <tab>`, while still
                # allowing multiple indent levels
-               (c == ' ' && i > 3 && buf.data[i-1] == ' ')
+               (c == UInt8(' ') && i > 3 && buf.data[i-1] == UInt8(' '))
                 edit_insert(s, " "^4)
                 return
             end
@@ -1456,11 +1456,11 @@ const prefix_history_keymap = merge!(
         "\e[200~" => "*"
     ),
     # VT220 editing commands
-    AnyDict(["\e[$(n)~" => "*" for n in 1:8]),
+    AnyDict("\e[$(n)~" => "*" for n in 1:8),
     # set mode commands
-    AnyDict(["\e[$(c)h" => "*" for c in 1:20]),
+    AnyDict("\e[$(c)h" => "*" for c in 1:20),
     # reset mode commands
-    AnyDict(["\e[$(c)l" => "*" for c in 1:20])
+    AnyDict("\e[$(c)l" => "*" for c in 1:20)
 )
 
 function setup_prefix_keymap(hp, parent_prompt)
@@ -1494,11 +1494,11 @@ activate(m::ModalInterface, s::MIState, termbuf, term::TextTerminal) =
 
 commit_changes(t::UnixTerminal, termbuf) = write(t, takebuf_array(termbuf.out_stream))
 function transition(f::Function, s::MIState, mode)
-    if mode == :abort
+    if mode === :abort
         s.aborted = true
         return
     end
-    if mode == :reset
+    if mode === :reset
         reset_state(s)
         return
     end
@@ -1564,7 +1564,7 @@ function run_interface(terminal, m::ModalInterface)
         p = s.current_mode
         buf, ok, suspend = prompt!(terminal, m, s)
         while suspend
-            @unix_only ccall(:jl_repl_raise_sigtstp, Cint, ())
+            @static if is_unix(); ccall(:jl_repl_raise_sigtstp, Cint, ()); end
             buf, ok, suspend = prompt!(terminal, m, s)
         end
         mode(state(s, s.current_mode)).on_done(s, buf, ok)
@@ -1599,16 +1599,16 @@ function prompt!(term, prompt, s = init_state(term, prompt))
                 warn(e)
                 state = :done
             end
-            if state == :abort
+            if state === :abort
                 return buffer(s), false, false
-            elseif state == :done
+            elseif state === :done
                 return buffer(s), true, false
-            elseif state == :suspend
-                @unix_only begin
+            elseif state === :suspend
+                if is_unix()
                     return buffer(s), true, true
                 end
             else
-                @assert state == :ok
+                @assert state === :ok
             end
         end
     finally

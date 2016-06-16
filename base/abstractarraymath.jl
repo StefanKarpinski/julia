@@ -61,7 +61,7 @@ imag{T<:Real}(x::AbstractArray{T}) = zero(x)
 # index A[:,:,...,i,:,:,...] where "i" is in dimension "d"
 # TODO: more optimized special cases
 slicedim(A::AbstractArray, d::Integer, i) =
-    A[[ n==d ? i : (1:size(A,n)) for n in 1:ndims(A) ]...]
+    A[[ n==d ? i : (indices(A,n)) for n in 1:ndims(A) ]...]
 
 function flipdim(A::AbstractVector, d::Integer)
     d > 0 || throw(ArgumentError("dimension to flip must be positive"))
@@ -71,8 +71,7 @@ end
 
 function flipdim(A::AbstractArray, d::Integer)
     nd = ndims(A)
-    sd = d > nd ? 1 : size(A, d)
-    if sd == 1 || isempty(A)
+    if d > nd || isempty(A)
         return copy(A)
     end
     B = similar(A)
@@ -80,16 +79,18 @@ function flipdim(A::AbstractArray, d::Integer)
     for i = 1:nd
         nnd += Int(size(A,i)==1 || i==d)
     end
+    inds = indices(A, d)
+    sd = first(inds)+last(inds)
     if nnd==nd
         # flip along the only non-singleton dimension
-        for i = 1:sd
-            B[i] = A[sd+1-i]
+        for i in inds
+            B[i] = A[sd-i]
         end
         return B
     end
-    alli = [ 1:size(B,n) for n in 1:nd ]
-    for i = 1:sd
-        B[[ n==d ? sd+1-i : alli[n] for n in 1:nd ]...] = slicedim(A, d, i)
+    alli = [ indices(B,n) for n in 1:nd ]
+    for i in inds
+        B[[ n==d ? sd-i : alli[n] for n in 1:nd ]...] = slicedim(A, d, i)
     end
     return B
 end
@@ -107,13 +108,14 @@ end
 
 # Uses K-B-N summation
 function cumsum_kbn{T<:AbstractFloat}(v::AbstractVector{T})
-    n = length(v)
-    r = similar(v, n)
-    if n == 0; return r; end
+    r = similar(v)
+    if isempty(v); return r; end
 
-    s = r[1] = v[1]
+    inds = indices(v, 1)
+    i1 = first(inds)
+    s = r[i1] = v[i1]
     c = zero(T)
-    for i=2:n #Fixme iter
+    for i=i1+1:last(inds)
         vi = v[i]
         t = s + vi
         if abs(s) >= abs(vi)
@@ -164,22 +166,10 @@ function cumsum_kbn{T<:AbstractFloat}(A::AbstractArray{T}, axis::Integer=1)
     return B + C
 end
 
-## Permute array dims ##
-
-function permutedims(B::AbstractArray, perm)
-    dimsB = size(B)
-    ndimsB = length(dimsB)
-    (ndimsB == length(perm) && isperm(perm)) || throw(ArgumentError("no valid permutation of dimensions"))
-    dimsP = ntuple(i->dimsB[perm[i]], ndimsB)::typeof(dimsB)
-    P = similar(B, dimsP)
-    permutedims!(P, B, perm)
-end
-
-
 ## ipermutedims in terms of permutedims ##
 
 function ipermutedims(A::AbstractArray,perm)
-    iperm = Array(Int,length(perm))
+    iperm = Array{Int}(length(perm))
     for (i,p) = enumerate(perm)
         iperm[p] = i
     end
@@ -212,31 +202,62 @@ function repmat(a::AbstractVector, m::Int)
     return b
 end
 
-# Generalized repmat
-function repeat{T}(A::Array{T};
-                   inner::Array{Int} = ones(Int, ndims(A)),
-                   outer::Array{Int} = ones(Int, ndims(A)))
+"""
+    repeat(A::AbstractArray; inner=ntuple(x->1, ndims(A)), outer=ntuple(x->1, ndims(A)))
+
+Construct an array by repeating the entries of `A`. The i-th element of `inner` specifies
+the number of times that the individual entries of the i-th dimension of `A` should be
+repeated. The i-th element of `outer` specifies the number of times that a slice along the
+i-th dimension of `A` should be repeated. If `inner` or `outer` are omitted, no repetition
+is performed.
+
+```jldoctest
+julia> repeat(1:2, inner=2)
+4-element Array{Int64,1}:
+ 1
+ 1
+ 2
+ 2
+
+julia> repeat(1:2, outer=2)
+4-element Array{Int64,1}:
+ 1
+ 2
+ 1
+ 2
+
+julia> repeat([1 2; 3 4], inner=(2, 1), outer=(1, 3))
+4×6 Array{Int64,2}:
+ 1  2  1  2  1  2
+ 1  2  1  2  1  2
+ 3  4  3  4  3  4
+ 3  4  3  4  3  4
+```
+"""
+function repeat(A::AbstractArray;
+                inner=ntuple(x->1, ndims(A)),
+                outer=ntuple(x->1, ndims(A)))
     ndims_in = ndims(A)
     length_inner = length(inner)
     length_outer = length(outer)
+
+    length_inner >= ndims_in || throw(ArgumentError("number of inner repetitions ($(length(inner))) cannot be less than number of dimensions of input ($(ndims(A)))"))
+    length_outer >= ndims_in || throw(ArgumentError("number of outer repetitions ($(length(outer))) cannot be less than number of dimensions of input ($(ndims(A)))"))
+
     ndims_out = max(ndims_in, length_inner, length_outer)
 
-    if length_inner < ndims_in || length_outer < ndims_in
-        throw(ArgumentError("inner/outer repetitions must be set for all input dimensions"))
-    end
-
-    inner = vcat(inner, ones(Int,ndims_out-length_inner))
-    outer = vcat(outer, ones(Int,ndims_out-length_outer))
+    inner = vcat(collect(inner), ones(Int,ndims_out-length_inner))
+    outer = vcat(collect(outer), ones(Int,ndims_out-length_outer))
 
     size_in = size(A)
     size_out = ntuple(i->inner[i]*size(A,i)*outer[i],ndims_out)::Dims
     inner_size_out = ntuple(i->inner[i]*size(A,i),ndims_out)::Dims
 
-    indices_in = Array(Int, ndims_in)
-    indices_out = Array(Int, ndims_out)
+    indices_in = Vector{Int}(ndims_in)
+    indices_out = Vector{Int}(ndims_out)
 
     length_out = prod(size_out)
-    R = Array(T, size_out)
+    R = similar(A, size_out)
 
     for index_out in 1:length_out
         ind2sub!(indices_out, size_out, index_out)

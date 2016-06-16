@@ -10,25 +10,58 @@ next(s::AbstractString, i::Integer) = next(s,Int(i))
 string() = ""
 string(s::AbstractString) = s
 
-bytestring() = ""
-bytestring(s::Vector{UInt8}) = bytestring(pointer(s),length(s))
+"""
+    String(s::AbstractString)
 
-function bytestring(p::Union{Ptr{UInt8},Ptr{Int8}})
-    p == C_NULL ? throw(ArgumentError("cannot convert NULL to string")) :
-    ccall(:jl_cstr_to_string, Any, (Cstring,), p)::ByteString
+Convert a string to a contiguous byte array representation encoded as UTF-8 bytes.
+This representation is often appropriate for passing strings to C.
+"""
+String(s::AbstractString) = print_to_string(s)
+String(s::String) = s
+
+# String constructor docstring from boot.jl, workaround for #16730
+# and the unavailability of @doc in boot.jl context.
+"""
+    String(v::Vector{UInt8})
+
+Create a new `String` from a vector `v` of bytes containing
+UTF-8 encoded characters.   This function takes "ownership" of
+the array, which means that you should not subsequently modify
+`v` (since strings are supposed to be immutable in Julia) for
+as long as the string exists.
+
+If you need to subsequently modify `v`, use `String(copy(v))` instead.
+"""
+String(v::Array{UInt8,1})
+
+
+"""
+    unsafe_string(p::Ptr{UInt8}, [length::Integer])
+
+Copy a string from the address of a C-style (NUL-terminated) string encoded as UTF-8.
+(The pointer can be safely freed afterwards.) If `length` is specified
+(the length of the data in bytes), the string does not have to be NUL-terminated.
+
+This function is labelled "unsafe" because it will crash if `p` is not
+a valid memory address to data of the requested length.
+
+See also [`unsafe_wrap(String, p, [length])`](:func:`unsafe_wrap`), which takes a pointer
+and wraps a string object around it without making a copy.
+"""
+function unsafe_string(p::Union{Ptr{UInt8},Ptr{Int8}}, len::Integer)
+    p == C_NULL && throw(ArgumentError("cannot convert NULL to string"))
+    ccall(:jl_pchar_to_string, Ref{String}, (Ptr{UInt8},Int), p, len)
 end
-bytestring(s::Cstring) = bytestring(convert(Ptr{UInt8}, s))
-
-function bytestring(p::Union{Ptr{UInt8},Ptr{Int8}},len::Integer)
-    p == C_NULL ? throw(ArgumentError("cannot convert NULL to string")) :
-    ccall(:jl_pchar_to_string, Any, (Ptr{UInt8},Int), p, len)::ByteString
+function unsafe_string(p::Union{Ptr{UInt8},Ptr{Int8}})
+    p == C_NULL && throw(ArgumentError("cannot convert NULL to string"))
+    ccall(:jl_cstr_to_string, Ref{String}, (Ptr{UInt8},), p)
 end
 
-convert(::Type{Vector{UInt8}}, s::AbstractString) = bytestring(s).data
-convert(::Type{Array{UInt8}}, s::AbstractString) = bytestring(s).data
-convert(::Type{ByteString}, s::AbstractString) = bytestring(s)
+convert(::Type{Vector{UInt8}}, s::AbstractString) = String(s).data
+convert(::Type{Array{UInt8}}, s::AbstractString) = String(s).data
+convert(::Type{String}, s::AbstractString) = String(s)
 convert(::Type{Vector{Char}}, s::AbstractString) = collect(s)
-convert(::Type{Symbol}, s::AbstractString) = symbol(s)
+convert(::Type{Symbol}, s::AbstractString) = Symbol(s)
 
 ## generic supplied functions ##
 
@@ -41,7 +74,7 @@ getindex{T<:Integer}(s::AbstractString, r::UnitRange{T}) = s[Int(first(r)):Int(l
 getindex(s::AbstractString, v::AbstractVector) =
     sprint(length(v), io->(for i in v; write(io,s[i]) end))
 
-symbol(s::AbstractString) = symbol(bytestring(s))
+Symbol(s::AbstractString) = Symbol(String(s))
 
 sizeof(s::AbstractString) = error("type $(typeof(s)) has no canonical binary representation")
 
@@ -92,10 +125,12 @@ isless(a::AbstractString, b::AbstractString) = cmp(a,b) < 0
 
 # faster comparisons for byte strings and symbols
 
-cmp(a::ByteString, b::ByteString) = lexcmp(a.data, b.data)
+cmp(a::String, b::String) = lexcmp(a.data, b.data)
 cmp(a::Symbol, b::Symbol) = Int(sign(ccall(:strcmp, Int32, (Cstring, Cstring), a, b)))
 
-==(a::ByteString, b::ByteString) = endof(a) == endof(b) && cmp(a,b) == 0
+==(a::String, b::String) =
+    (len = length(a.data)) == length(b.data) &&
+    ccall(:memcmp, Int32, (Ptr{UInt8}, Ptr{UInt8}, UInt), a.data, b.data, len) == 0
 isless(a::Symbol, b::Symbol) = cmp(a,b) < 0
 
 ## Generic validation functions ##
@@ -114,17 +149,43 @@ end
 
 ## Generic indexing functions ##
 
-prevind(s::DirectIndexString, i::Integer) = i-1
-prevind(s::AbstractArray   , i::Integer) = i-1
-nextind(s::DirectIndexString, i::Integer) = i+1
-nextind(s::AbstractArray   , i::Integer) = i+1
+prevind(s::DirectIndexString, i::Integer) = Int(i)-1
+prevind(s::AbstractArray    , i::Integer) = Int(i)-1
+nextind(s::DirectIndexString, i::Integer) = Int(i)+1
+nextind(s::AbstractArray    , i::Integer) = Int(i)+1
+
+function prevind(s::String, i::Integer)
+    j = Int(i)
+    e = endof(s.data)
+    if j > e
+        return endof(s)
+    end
+    j -= 1
+    while j > 0 && is_valid_continuation(s.data[j])
+        j -= 1
+    end
+    j
+end
+
+function nextind(s::String, i::Integer)
+    j = Int(i)
+    if j < 1
+        return 1
+    end
+    e = endof(s.data)
+    j += 1
+    while j <= e && is_valid_continuation(s.data[j])
+        j += 1
+    end
+    j
+end
 
 function prevind(s::AbstractString, i::Integer)
     e = endof(s)
     if i > e
         return e
     end
-    j = i-1
+    j = Int(i)-1
     while j >= 1
         if isvalid(s,j)
             return j
@@ -140,9 +201,9 @@ function nextind(s::AbstractString, i::Integer)
         return 1
     end
     if i > e
-        return i+1
+        return Int(i)+1
     end
-    for j = i+1:e
+    for j = Int(i)+1:e
         if isvalid(s,j)
             return j
         end
@@ -208,27 +269,24 @@ strwidth(s::AbstractString) = (w=0; for c in s; w += charwidth(c); end; w)
 
 isascii(c::Char) = c < Char(0x80)
 isascii(s::AbstractString) = all(isascii, s)
-isascii(s::ASCIIString) = true
 
 ## string promotion rules ##
 
-promote_rule{S<:AbstractString,T<:AbstractString}(::Type{S}, ::Type{T}) = UTF8String
+promote_rule{S<:AbstractString,T<:AbstractString}(::Type{S}, ::Type{T}) = String
 
 isxdigit(c::Char) = '0'<=c<='9' || 'a'<=c<='f' || 'A'<=c<='F'
 isxdigit(s::AbstractString) = all(isxdigit, s)
-need_full_hex(s::AbstractString, i::Int) = !done(s,i) && isxdigit(next(s,i)[1])
 
 ## checking UTF-8 & ACSII validity ##
 
 byte_string_classify(data::Vector{UInt8}) =
     ccall(:u8_isvalid, Int32, (Ptr{UInt8}, Int), data, length(data))
-byte_string_classify(s::ByteString) = byte_string_classify(s.data)
+byte_string_classify(s::String) = byte_string_classify(s.data)
     # 0: neither valid ASCII nor UTF-8
     # 1: valid ASCII
     # 2: valid UTF-8
 
-isvalid(::Type{ASCIIString}, s::Union{Vector{UInt8},ByteString}) = byte_string_classify(s) == 1
-isvalid(::Type{UTF8String}, s::Union{Vector{UInt8},ByteString}) = byte_string_classify(s) != 0
+isvalid(::Type{String}, s::Union{Vector{UInt8},String}) = byte_string_classify(s) != 0
 
 ## uppercase and lowercase transformations ##
 uppercase(s::AbstractString) = map(uppercase, s)
@@ -243,11 +301,8 @@ end
 
 ## string map, filter, has ##
 
-map_result(s::AbstractString, a::Vector{UInt8}) = UTF8String(a)
-map_result(s::Union{ASCIIString,SubString{ASCIIString}}, a::Vector{UInt8}) = bytestring(a)
-
 function map(f, s::AbstractString)
-    out = IOBuffer(Array(UInt8,endof(s)),true,true)
+    out = IOBuffer(Array{UInt8}(endof(s)),true,true)
     truncate(out,0)
     for c in s
         c2 = f(c)
@@ -256,11 +311,11 @@ function map(f, s::AbstractString)
         end
         write(out, c2::Char)
     end
-    map_result(s, takebuf_array(out))
+    String(takebuf_array(out))
 end
 
 function filter(f, s::AbstractString)
-    out = IOBuffer(Array(UInt8,endof(s)),true,true)
+    out = IOBuffer(Array{UInt8}(endof(s)),true,true)
     truncate(out,0)
     for c in s
         if f(c)
@@ -269,4 +324,3 @@ function filter(f, s::AbstractString)
     end
     takebuf_string(out)
 end
-

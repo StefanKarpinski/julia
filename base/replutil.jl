@@ -1,62 +1,7 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
 # fallback text/plain representation of any type:
-writemime(io::IO, ::MIME"text/plain", x) = showcompact(io, x)
-writemime(io::IO, ::MIME"text/plain", x::Number) = show(io, x)
-
-function writemime(io::IO, ::MIME"text/plain", f::Function)
-    ft = typeof(f)
-    mt = ft.name.mt
-    name = mt.name
-    isself = isdefined(ft.name.module, name) &&
-             ft == typeof(getfield(ft.name.module, name))
-    n = length(mt)
-    m = n==1 ? "method" : "methods"
-    ns = isself ? string(name) : string("(::", name, ")")
-    what = startswith(ns, '@') ? "macro" : "generic function"
-    print(io, ns, " (", what, " with $n $m)")
-end
-
-function writemime(io::IO, ::MIME"text/plain", f::Builtin)
-    print(io, typeof(f).name.mt.name, " (built-in function)")
-end
-
-# writemime for ranges, e.g.
-#  3-element UnitRange{Int64,Int}
-#   1,2,3
-# or for more elements than fit on screen:
-#   1.0,2.0,3.0,…,6.0,7.0,8.0
-function writemime(io::IO, ::MIME"text/plain", r::Range)
-    print(io, summary(r))
-    if !isempty(r)
-        println(io, ":")
-        print_range(IOContext(io, :limit_output => true), r)
-    end
-end
-
-function writemime(io::IO, ::MIME"text/plain", v::AbstractVector)
-    print(io, summary(v))
-    if !isempty(v)
-        println(io, ":")
-        print_matrix(IOContext(io, :limit_output => true), v)
-    end
-end
-
-writemime(io::IO, ::MIME"text/plain", v::AbstractArray) =
-    showarray(IOContext(io, :limit_output => true), v, header=true, repr=false)
-
-function writemime(io::IO, ::MIME"text/plain", v::DataType)
-    show(io, v)
-    # TODO: maybe show constructor info?
-end
-
-function writemime(io::IO, ::MIME"text/plain", t::Task)
-    show(io, t)
-    if t.state == :failed
-        println(io)
-        showerror(io, CapturedException(t.result, t.backtrace))
-    end
-end
+show(io::IO, ::MIME"text/plain", x) = show(io, x)
 
 
 # showing exception objects as descriptive error messages
@@ -67,13 +12,18 @@ function showerror(io::IO, ex::BoundsError)
     print(io, "BoundsError")
     if isdefined(ex, :a)
         print(io, ": attempt to access ")
-        writemime(io, MIME"text/plain"(), ex.a)
+        if isa(ex.a, AbstractArray)
+            print(io, summary(ex.a))
+        else
+            show(io, MIME"text/plain"(), ex.a)
+        end
         if isdefined(ex, :i)
-            print(io, "\n  at index [")
+            !isa(ex.a, AbstractArray) && print(io, "\n ")
+            print(io, " at index [")
             if isa(ex.i, Range)
                 print(io, ex.i)
             else
-                print_joined(io, ex.i, ',')
+                join(io, ex.i, ',')
             end
             print(io, ']')
         end
@@ -120,15 +70,17 @@ showerror(io::IO, ex::InitError) = showerror(io, ex, [])
 function showerror(io::IO, ex::DomainError, bt; backtrace=true)
     print(io, "DomainError:")
     for b in bt
-        code = StackTraces.lookup(b)
+        code = StackTraces.lookup(b)[1]
         if !code.from_c
-            if code.func in (:log, :log2, :log10, :sqrt) # TODO add :besselj, :besseli, :bessely, :besselk
+            if code.func == :nan_dom_err
+                continue
+            elseif code.func in (:log, :log2, :log10, :sqrt) # TODO add :besselj, :besseli, :bessely, :besselk
                 print(io,"\n$(code.func) will only return a complex result if called with a complex argument. Try $(string(code.func))(complex(x)).")
-            elseif (code.func == :^ && code.file == symbol("intfuncs.jl")) || code.func == :power_by_squaring #3024
+            elseif (code.func == :^ && code.file == Symbol("intfuncs.jl")) || code.func == :power_by_squaring #3024
                 print(io, "\nCannot raise an integer x to a negative power -n. \nMake x a float by adding a zero decimal (e.g. 2.0^-n instead of 2^-n), or write 1/x^n, float(x)^-n, or (x//1)^-n.")
             elseif code.func == :^ &&
-                    (code.file == symbol("promotion.jl") || code.file == symbol("math.jl") ||
-                    code.file == symbol(joinpath(".","promotion.jl")) || code.file == symbol(joinpath(".","math.jl")))
+                    (code.file == Symbol("promotion.jl") || code.file == Symbol("math.jl") ||
+                    code.file == Symbol(joinpath(".","promotion.jl")) || code.file == Symbol(joinpath(".","math.jl")))
                 print(io, "\nExponentiation yielding a complex result requires a complex argument.\nReplace x^y with (x+0im)^y, Complex(x)^y, or similar.")
             end
             break
@@ -151,7 +103,7 @@ showerror(io::IO, ::UndefRefError) = print(io, "UndefRefError: access to undefin
 showerror(io::IO, ex::UndefVarError) = print(io, "UndefVarError: $(ex.var) not defined")
 showerror(io::IO, ::EOFError) = print(io, "EOFError: read end of file")
 showerror(io::IO, ex::ErrorException) = print(io, ex.msg)
-showerror(io::IO, ex::KeyError) = print(io, "KeyError: $(ex.key) not found")
+showerror(io::IO, ex::KeyError) = print(io, "KeyError: key $(repr(ex.key)) not found")
 showerror(io::IO, ex::InterruptException) = print(io, "InterruptException:")
 showerror(io::IO, ex::ArgumentError) = print(io, "ArgumentError: $(ex.msg)")
 showerror(io::IO, ex::AssertionError) = print(io, "AssertionError: $(ex.msg)")
@@ -161,9 +113,13 @@ function showerror(io::IO, ex::MethodError)
     # a tuple of the arguments otherwise.
     is_arg_types = isa(ex.args, DataType)
     arg_types = is_arg_types ? ex.args : typesof(ex.args...)
+    f = ex.f
+    meth = methods_including_ambiguous(f, arg_types)
+    if length(meth) > 1
+        return showerror_ambiguous(io, meth, f, arg_types)
+    end
     arg_types_param::SimpleVector = arg_types.parameters
     print(io, "MethodError: ")
-    f = ex.f
     ft = typeof(f)
     name = ft.name.mt.name
     f_is_function = false
@@ -242,6 +198,20 @@ end
 striptype{T}(::Type{T}) = T
 striptype(::Any) = nothing
 
+function showerror_ambiguous(io::IO, meth, f, args)
+    print(io, "MethodError: ", f, "(")
+    p = args.parameters
+    for (i,a) in enumerate(p)
+        print(io, "::", a)
+        i == length(p) ? print(io, ")") : print(io, ", ")
+    end
+    print(io, " is ambiguous. Candidates:")
+    for m in meth
+        print(io, "\n  ", m)
+    end
+    nothing
+end
+
 #Show an error by directly calling jl_printf.
 #Useful in Base submodule __init__ functions where STDERR isn't defined yet.
 function showerror_nostdio(err, msg::AbstractString)
@@ -267,35 +237,30 @@ function show_method_candidates(io::IO, ex::MethodError)
     lines = []
     # These functions are special cased to only show if first argument is matched.
     special = f in [convert, getindex, setindex!]
-    funcs = Any[(Core.Typeof(f),arg_types_param)]
+    funcs = Any[(f, arg_types_param)]
 
     # An incorrect call method produces a MethodError for convert.
     # It also happens that users type convert when they mean call. So
     # pool MethodErrors for these two functions.
     if f === convert && !isempty(arg_types_param)
-        push!(funcs, (arg_types_param[1],arg_types_param[2:end]))
+        at1 = arg_types_param[1]
+        if isa(at1,DataType) && (at1::DataType).name === Type.name && isleaftype(at1)
+            push!(funcs, (at1.parameters[1], arg_types_param[2:end]))
+        end
     end
 
     for (func,arg_types_param) in funcs
-        for method in func.name.mt
+        for method in methods(func)
             buf = IOBuffer()
             s1 = method.sig.parameters[1]
             sig = method.sig.parameters[2:end]
             print(buf, "  ")
-            if !(func <: s1)
+            if !isa(func, s1)
                 # function itself doesn't match
-                print(buf, "(")
-                if Base.have_color
-                    Base.with_output_color(:red, buf) do buf
-                        print(buf, "::", s1)
-                    end
-                else
-                    print(buf, "!Matched::", s1)
-                end
-                print(buf, ")")
+                return
             else
-                use_constructor_syntax = func.name === Type.name && !isa(func.parameters[1],TypeVar)
-                print(buf, use_constructor_syntax ? func.parameters[1] : func.name.mt.name)
+                use_constructor_syntax = isa(func, Type)
+                print(buf, use_constructor_syntax ? func : typeof(func).name.mt.name)
             end
             right_matches = 0
             tv = method.tvars
@@ -341,7 +306,7 @@ function show_method_candidates(io::IO, ex::MethodError)
                     print(buf, "::$sigstr")
                 end
             end
-            special && right_matches==0 && continue
+            special && right_matches==0 && return # continue the do-block
 
             if length(t_i) > length(sig) && !isempty(sig) && Base.isvarargtype(sig[end])
                 # It ensures that methods like f(a::AbstractString...) gets the correct
@@ -434,25 +399,27 @@ function process_backtrace(process_func::Function, top_function::Symbol, t::Vect
     last_frame = StackTraces.UNKNOWN
     count = 0
     for i = eachindex(t)
-        lkup = StackTraces.lookup(t[i])
-        if lkup === StackTraces.UNKNOWN
-            continue
-        end
-
-        if lkup.from_c && skipC; continue; end
-        if i == 1 && lkup.func == :error; continue; end
-        if lkup.func == top_function; break; end
-        count += 1
-        if !in(count, set); continue; end
-
-        if lkup.file != last_frame.file || lkup.line != last_frame.line || lkup.func != last_frame.func
-            if n > 0
-                process_func(last_frame, n)
+        lkups = StackTraces.lookup(t[i])
+        for lkup in lkups
+            if lkup === StackTraces.UNKNOWN
+                continue
             end
-            n = 1
-            last_frame = lkup
-        else
-            n += 1
+
+            if lkup.from_c && skipC; continue; end
+            if i == 1 && lkup.func == :error; continue; end
+            if lkup.func == top_function; break; end
+            count += 1
+            if !in(count, set); continue; end
+
+            if lkup.file != last_frame.file || lkup.line != last_frame.line || lkup.func != last_frame.func
+                if n > 0
+                    process_func(last_frame, n)
+                end
+                n = 1
+                last_frame = lkup
+            else
+                n += 1
+            end
         end
     end
     if n > 0

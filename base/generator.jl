@@ -1,3 +1,5 @@
+# This file is a part of Julia. License is MIT: http://julialang.org/license
+
 """
     Generator(f, iter)
 
@@ -21,6 +23,7 @@ function next(g::Generator, s)
     v, s2 = next(g.iter, s)
     g.f(v), s2
 end
+
 
 ## iterator traits
 
@@ -52,7 +55,6 @@ iteratorsize{T<:AbstractArray}(::Type{T}) = HasShape()
 iteratorsize{I,F}(::Type{Generator{I,F}}) = iteratorsize(I)
 length(g::Generator) = length(g.iter)
 size(g::Generator) = size(g.iter)
+ndims(g::Generator) = ndims(g.iter)
 
 iteratoreltype{I,T}(::Type{Generator{I,T}}) = EltypeUnknown()
-iteratoreltype{I,T}(::Type{Generator{I,Type{T}}}) = HasEltype()
-eltype{I,T}(::Type{Generator{I,Type{T}}}) = T

@@ -233,16 +233,11 @@ static int OpInfoLookup(void *DisInfo, uint64_t PC, uint64_t Offset, uint64_t Si
     default: return 0;          // Cannot handle input address size
     }
     int skipC = 0;
-    char *name;
-    char *filename;
-    size_t line;
-    char *inlinedat_file;
-    size_t inlinedat_line;
-    jl_lambda_info_t *outer_linfo;
-    int fromC;
-    jl_getFunctionInfo(&name, &filename, &line, &inlinedat_file, &inlinedat_line, &outer_linfo, pointer, &fromC, skipC, 1);
-    free(filename);
-    free(inlinedat_file);
+    jl_frame_t *frame;
+    jl_getFunctionInfo(&frame, pointer, skipC, 1);
+    char *name = frame->func_name;
+    free(frame->file_name);
+    free(frame);
     if (!name)
         return 0;               // Did not find symbolic information
     // Describe the symbol
@@ -294,6 +289,7 @@ void jl_dump_asm_internal(uintptr_t Fptr, size_t Fsize, int64_t slide,
 #endif
                           )
 {
+    // GC safe
     // Get the host information
     std::string TripleName;
     if (TripleName.empty())
@@ -347,7 +343,10 @@ void jl_dump_asm_internal(uintptr_t Fptr, size_t Fsize, int64_t slide,
 #else
     MCContext Ctx(*MAI, *MRI, MOFI.get(), &SrcMgr);
 #endif
-#ifdef LLVM37
+#ifdef LLVM39
+    MOFI->InitMCObjectFileInfo(TheTriple, /* PIC */ false,
+                               CodeModel::Default, Ctx);
+#elif defined(LLVM37)
     MOFI->InitMCObjectFileInfo(TheTriple, Reloc::Default, CodeModel::Default, Ctx);
 #else
     MOFI->InitMCObjectFileInfo(TripleName, Reloc::Default, CodeModel::Default, Ctx);
@@ -562,18 +561,7 @@ void jl_dump_asm_internal(uintptr_t Fptr, size_t Fsize, int64_t slide,
 
             MCInst Inst;
             MCDisassembler::DecodeStatus S;
-#if defined(_CPU_PPC64_) && BYTE_ORDER == LITTLE_ENDIAN
-            // llvm doesn't know that POWER8 can have little-endian instruction order
-            unsigned char byte_swap_buf[4];
-            assert(memoryObject.size() >= 4);
-            byte_swap_buf[3] = memoryObject[Index+0];
-            byte_swap_buf[2] = memoryObject[Index+1];
-            byte_swap_buf[1] = memoryObject[Index+2];
-            byte_swap_buf[0] = memoryObject[Index+3];
-            FuncMCView view = FuncMCView(byte_swap_buf, 4);
-#else
             FuncMCView view = memoryObject.slice(Index);
-#endif
             S = DisAsm->getInstruction(Inst, insSize, view, 0,
                                       /*REMOVE*/ nulls(), nulls());
             switch (S) {

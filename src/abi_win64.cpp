@@ -37,19 +37,19 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "abi_x86_vec.h"
 
 struct AbiState {
 };
 
 const AbiState default_abi_state = {};
 
-
 bool use_sret(AbiState *state, jl_value_t *ty)
 {
     if(!jl_is_datatype(ty) || jl_is_abstracttype(ty) || jl_is_cpointer_type(ty) || jl_is_array_type(ty))
         return false;
     size_t size = jl_datatype_size(ty);
-    if (size <= 8)
+    if (size <= 8 || is_native_simd_type(ty))
         return false;
     return true;
 }
@@ -69,7 +69,7 @@ Type *preferred_llvm_type(jl_value_t *ty, bool isret)
         return NULL;
     size_t size = jl_datatype_size(ty);
     if (size > 0 && size <= 8 && !jl_is_bitstype(ty))
-        return Type::getIntNTy(getGlobalContext(), size*8);
+        return Type::getIntNTy(jl_LLVMContext, size*8);
     return NULL;
 }
 

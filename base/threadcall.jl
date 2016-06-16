@@ -44,7 +44,7 @@ macro threadcall(f, rettype, argtypes, argvals...)
     body = wrapper.args[2].args
     args = Symbol[]
     for (i,T) in enumerate(argtypes)
-        arg = symbol("arg$i")
+        arg = Symbol("arg", i)
         push!(body, :($arg = unsafe_load(convert(Ptr{$T}, p))))
         push!(body, :(p += sizeof($T)))
         push!(args, arg)
@@ -76,7 +76,7 @@ function do_threadcall(wrapper::Function, rettype::Type, argtypes::Vector, argva
     end
 
     # create return buffer
-    ret_arr = Array(UInt8, sizeof(rettype))
+    ret_arr = Array{UInt8}(sizeof(rettype))
 
     # wait for a worker thread to be available
     acquire(threadcall_restrictor)

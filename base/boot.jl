@@ -64,7 +64,6 @@
 #    sparams::Tuple
 #    tfunc
 #    name::Symbol
-#    specializations
 #    inferred
 #    file::Symbol
 #    line::Int
@@ -83,7 +82,6 @@
 #end
 
 #immutable LineNumberNode
-#    file::Symbol
 #    line::Int
 #end
 
@@ -97,10 +95,6 @@
 
 #immutable QuoteNode
 #    value
-#end
-
-#immutable TopNode
-#    name::Symbol
 #end
 
 #immutable GlobalRef
@@ -125,22 +119,22 @@ export
     Tuple, Type, TypeConstructor, TypeName, TypeVar, Union, Void,
     SimpleVector, AbstractArray, DenseArray,
     # special objects
-    Function, LambdaInfo, Method, MethodTable,
-    Module, Symbol, Task, Array, WeakRef,
+    Function, LambdaInfo, Method, MethodTable, TypeMapEntry, TypeMapLevel,
+    Module, Symbol, Task, Array, WeakRef, VecElement,
     # numeric types
     Number, Real, Integer, Bool, Ref, Ptr,
     AbstractFloat, Float16, Float32, Float64,
     Signed, Int, Int8, Int16, Int32, Int64, Int128,
     Unsigned, UInt, UInt8, UInt16, UInt32, UInt64, UInt128,
     # string types
-    Char, ASCIIString, ByteString, DirectIndexString, AbstractString, UTF8String,
+    Char, DirectIndexString, AbstractString, String, IO,
     # errors
-    BoundsError, DivideError, DomainError, Exception, InexactError,
+    ErrorException, BoundsError, DivideError, DomainError, Exception, InexactError,
     InterruptException, OutOfMemoryError, ReadOnlyMemoryError, OverflowError,
     StackOverflowError, SegmentationFault, UndefRefError, UndefVarError, TypeError,
     # AST representation
-    Expr, GotoNode, LabelNode, LineNumberNode, QuoteNode, TopNode,
-    GlobalRef, NewvarNode, GenSym, Slot,
+    Expr, GotoNode, LabelNode, LineNumberNode, QuoteNode,
+    GlobalRef, NewvarNode, SSAValue, Slot, SlotNumber, TypedSlot,
     # object model functions
     fieldtype, getfield, setfield!, nfields, throw, tuple, is, ===, isdefined, eval,
     # sizeof    # not exported, to avoid conflicting with Base.sizeof
@@ -152,6 +146,8 @@ export
     nothing, Main
 
 const (===) = is
+
+typealias AnyVector Array{Any,1}
 
 abstract Number
 abstract Real     <: Number
@@ -190,6 +186,10 @@ function Typeof end
 (f::typeof(Typeof))(x::ANY) = isa(x,Type) ? Type{x} : typeof(x)
 
 abstract Exception
+type ErrorException <: Exception
+    msg::AbstractString
+    ErrorException(msg::AbstractString) = new(msg)
+end
 immutable BoundsError        <: Exception
     a::Any
     i::Any
@@ -219,19 +219,13 @@ end
 
 abstract DirectIndexString <: AbstractString
 
-immutable ASCIIString <: DirectIndexString
+immutable String <: AbstractString
     data::Array{UInt8,1}
-    ASCIIString(d::Array{UInt8,1}) = new(d)
+    # required to make String("foo") work (#15120):
+    String(d::Array{UInt8,1}) = new(d)
 end
 
-immutable UTF8String <: AbstractString
-    data::Array{UInt8,1}
-    UTF8String(d::Array{UInt8,1}) = new(d)
-end
-
-typealias ByteString Union{ASCIIString,UTF8String}
-
-include(fname::ByteString) = ccall(:jl_load_, Any, (Any,), fname)
+include(fname::String) = ccall(:jl_load_, Any, (Any,), fname)
 
 eval(e::ANY) = eval(Main, e)
 eval(m::Module, e::ANY) = ccall(:jl_toplevel_eval_in, Any, (Any, Any), m, e)
@@ -251,51 +245,60 @@ end
 type WeakRef
     value
     WeakRef() = WeakRef(nothing)
-    WeakRef(v::ANY) = ccall(:jl_gc_new_weakref, Any, (Any,), v)::WeakRef
+    WeakRef(v::ANY) = ccall(:jl_gc_new_weakref, Ref{WeakRef}, (Any,), v)
 end
 
 TypeVar(n::Symbol) =
-    ccall(:jl_new_typevar, Any, (Any, Any, Any), n, Union{}, Any)::TypeVar
+    ccall(:jl_new_typevar, Ref{TypeVar}, (Any, Any, Any), n, Union{}, Any)
 TypeVar(n::Symbol, ub::ANY) =
     (isa(ub,Bool) ?
-     ccall(:jl_new_typevar_, Any, (Any, Any, Any, Any), n, Union{}, Any, ub)::TypeVar :
-     ccall(:jl_new_typevar, Any, (Any, Any, Any), n, Union{}, ub::Type)::TypeVar)
+     ccall(:jl_new_typevar_, Ref{TypeVar}, (Any, Any, Any, Any), n, Union{}, Any, ub) :
+     ccall(:jl_new_typevar, Ref{TypeVar}, (Any, Any, Any), n, Union{}, ub::Type))
 TypeVar(n::Symbol, lb::ANY, ub::ANY) =
     (isa(ub,Bool) ?
-     ccall(:jl_new_typevar_, Any, (Any, Any, Any, Any), n, Union{}, lb::Type, ub)::TypeVar :
-     ccall(:jl_new_typevar, Any, (Any, Any, Any), n, lb::Type, ub::Type)::TypeVar)
+     ccall(:jl_new_typevar_, Ref{TypeVar}, (Any, Any, Any, Any), n, Union{}, lb::Type, ub) :
+     ccall(:jl_new_typevar, Ref{TypeVar}, (Any, Any, Any), n, lb::Type, ub::Type))
 TypeVar(n::Symbol, lb::ANY, ub::ANY, b::Bool) =
-    ccall(:jl_new_typevar_, Any, (Any, Any, Any, Any), n, lb::Type, ub::Type, b)::TypeVar
+    ccall(:jl_new_typevar_, Ref{TypeVar}, (Any, Any, Any, Any), n, lb::Type, ub::Type, b)
 
-TypeConstructor(p::ANY, t::ANY) = ccall(:jl_new_type_constructor, Any, (Any, Any), p::SimpleVector, t::Type)
+TypeConstructor(p::ANY, t::ANY) =
+    ccall(:jl_new_type_constructor, Ref{TypeConstructor}, (Any, Any), p::SimpleVector, t::Type)
 
 Void() = nothing
 
+immutable VecElement{T}
+    value::T
+end
+
 Expr(args::ANY...) = _expr(args...)
+
+# used by lowering of splicing unquote
+splicedexpr(hd::Symbol, args::Array{Any,1}) = (e=Expr(hd); e.args=args; e)
 
 _new(typ::Symbol, argty::Symbol) = eval(:((::Type{$typ})(n::$argty) = $(Expr(:new, typ, :n))))
 _new(:LabelNode, :Int)
 _new(:GotoNode, :Int)
-_new(:TopNode, :Symbol)
-_new(:NewvarNode, :Slot)
+_new(:NewvarNode, :SlotNumber)
 _new(:QuoteNode, :ANY)
-_new(:GenSym, :Int)
-eval(:((::Type{LineNumberNode})(f::Symbol, l::Int) = $(Expr(:new, :LineNumberNode, :f, :l))))
+_new(:SSAValue, :Int)
+eval(:((::Type{LineNumberNode})(l::Int) = $(Expr(:new, :LineNumberNode, :l))))
 eval(:((::Type{GlobalRef})(m::Module, s::Symbol) = $(Expr(:new, :GlobalRef, :m, :s))))
-eval(:((::Type{Slot})(n::Int) = $(Expr(:new, :Slot, :n, Any))))
-eval(:((::Type{Slot})(n::Int, t::ANY) = $(Expr(:new, :Slot, :n, :t))))
+eval(:((::Type{SlotNumber})(n::Int) = $(Expr(:new, :SlotNumber, :n))))
+eval(:((::Type{TypedSlot})(n::Int, t::ANY) = $(Expr(:new, :TypedSlot, :n, :t))))
 
-Module(name::Symbol=:anonymous, std_imports::Bool=true) = ccall(:jl_f_new_module, Any, (Any, Bool), name, std_imports)::Module
+Module(name::Symbol=:anonymous, std_imports::Bool=true) = ccall(:jl_f_new_module, Ref{Module}, (Any, Bool), name, std_imports)
 
-Task(f::ANY) = ccall(:jl_new_task, Any, (Any, Int), f, 0)::Task
+Task(f::ANY) = ccall(:jl_new_task, Ref{Task}, (Any, Int), f, 0)
 
 # simple convert for use by constructors of types in Core
 # note that there is no actual conversion defined here,
 # so the methods and ccall's in Core aren't permitted to use convert
 convert(::Type{Any}, x::ANY) = x
 convert{T}(::Type{T}, x::T) = x
-cconvert(T::Type, x) = convert(T, x)
+cconvert{T}(::Type{T}, x) = convert(T, x)
 unsafe_convert{T}(::Type{T}, x::T) = x
+
+typealias NTuple{N,T} Tuple{Vararg{T,N}}
 
 # primitive array constructors
 (::Type{Array{T,N}}){T,N}(d::NTuple{N,Int}) =
@@ -321,6 +324,55 @@ Array{T}(::Type{T}, d::Int...) = Array{T}(d)
 Array{T}(::Type{T}, m::Int)               = Array{T,1}(m)
 Array{T}(::Type{T}, m::Int,n::Int)        = Array{T,2}(m,n)
 Array{T}(::Type{T}, m::Int,n::Int,o::Int) = Array{T,3}(m,n,o)
+
+
+# docsystem basics
+macro doc(x...)
+    atdoc(x...)
+end
+macro __doc__(x)
+    Expr(:escape, Expr(:block, Expr(:meta, :doc), x))
+end
+macro doc_str(s)
+    Expr(:escape, s)
+end
+atdoc     = (str, expr) -> Expr(:escape, expr)
+atdoc!(λ) = global atdoc = λ
+
+
+# simple stand-alone print definitions for debugging
+abstract IO
+type CoreSTDOUT <: IO end
+type CoreSTDERR <: IO end
+const STDOUT = CoreSTDOUT()
+const STDERR = CoreSTDERR()
+io_pointer(::CoreSTDOUT) = Intrinsics.pointerref(Intrinsics.cglobal(:jl_uv_stdout, Ptr{Void}), 1)
+io_pointer(::CoreSTDERR) = Intrinsics.pointerref(Intrinsics.cglobal(:jl_uv_stderr, Ptr{Void}), 1)
+
+unsafe_write(io::IO, x::Ptr{UInt8}, nb::UInt) =
+    (ccall(:jl_uv_puts, Void, (Ptr{Void}, Ptr{UInt8}, UInt), io_pointer(io), x, nb); nb)
+unsafe_write(io::IO, x::Ptr{UInt8}, nb::Int) =
+    (ccall(:jl_uv_puts, Void, (Ptr{Void}, Ptr{UInt8}, Int), io_pointer(io), x, nb); nb)
+write(io::IO, x::UInt8) =
+    (ccall(:jl_uv_putb, Void, (Ptr{Void}, UInt8), io_pointer(io), x); 1)
+function write(io::IO, x::String)
+    nb = sizeof(x.data)
+    unsafe_write(io, ccall(:jl_array_ptr, Ptr{UInt8}, (Any,), x.data), nb)
+    return nb
+end
+
+show(io::IO, x::ANY) = ccall(:jl_static_show, Void, (Ptr{Void}, Any), io_pointer(io), x)
+print(io::IO, x::Char) = ccall(:jl_uv_putc, Void, (Ptr{Void}, Char), io_pointer(io), x)
+print(io::IO, x::String) = write(io, x)
+print(io::IO, x::ANY) = show(io, x)
+print(io::IO, x::ANY, a::ANY...) = (print(io, x); print(io, a...))
+println(io::IO) = write(io, 0x0a) # 0x0a = '\n'
+println(io::IO, x::ANY...) = (print(io, x...); println(io))
+
+show(a::ANY) = show(STDOUT, a)
+print(a::ANY...) = print(STDOUT, a...)
+println(a::ANY...) = println(STDOUT, a...)
+
 
 module TopModule
     # this defines the types that lowering expects to be defined in a (top) module

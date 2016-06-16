@@ -6,11 +6,15 @@ isinteger(x::Integer) = true
 
 size(x::Number) = ()
 size(x::Number,d) = convert(Int,d)<1 ? throw(BoundsError()) : 1
+indices(x::Number) = ()
+indices(x::Number,d) = convert(Int,d)<1 ? throw(BoundsError()) : (1:1)
 eltype{T<:Number}(::Type{T}) = T
 ndims(x::Number) = 0
 ndims{T<:Number}(::Type{T}) = 0
 length(x::Number) = 1
 endof(x::Number) = 1
+iteratorsize{T<:Number}(::Type{T}) = HasShape()
+
 getindex(x::Number) = x
 function getindex(x::Number, i::Integer)
     @_inline_meta
@@ -25,6 +29,7 @@ end
 getindex(x::Number, I::Real...) = getindex(x, to_indexes(I...)...)
 first(x::Number) = x
 last(x::Number) = x
+copy(x::Number) = x  # some code treats numbers as collection-like
 
 divrem(x,y) = (div(x,y),rem(x,y))
 fldmod(x,y) = (fld(x,y),mod(x,y))
@@ -45,9 +50,9 @@ angle(z::Real) = atan2(zero(z), z)
 
 widemul(x::Number, y::Number) = widen(x)*widen(y)
 
-start(x::Number) = false
-next(x::Number, state) = (x, true)
-done(x::Number, state) = state
+start(x::Number) = 0  # see #16687
+next(x::Number, state) = (x, state+1)
+done(x::Number, state) = state == 1
 isempty(x::Number) = false
 in(x::Number, y::Number) = x == y
 

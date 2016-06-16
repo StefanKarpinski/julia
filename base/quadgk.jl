@@ -88,7 +88,6 @@ rulekey(T,n) = (T,n)
 # with absolute tolerance abstol and relative tolerance reltol,
 # with maxevals an approximate maximum number of f evaluations.
 function do_quadgk{Tw}(f, s, n, ::Type{Tw}, abstol, reltol, maxevals, nrm)
-
     if eltype(s) <: Real # check for infinite or semi-infinite intervals
         s1 = s[1]; s2 = s[end]; inf1 = isinf(s1); inf2 = isinf(s2)
         if inf1 || inf2
@@ -169,10 +168,10 @@ end
 # all the integration-segment endpoints
 function quadgk(f, a, b, c...; kws...)
     T = promote_type(typeof(float(a)), typeof(b))
-    for i in 1:length(c)
-        T = promote_type(T, typeof(c[i]))
+    for x in c
+        T = promote_type(T, typeof(x))
     end
-    cT = T[ c[i] for i in 1:length(c) ]
+    cT = map(T, c)
     quadgk(f, convert(T, a), convert(T, b), cT...; kws...)
 end
 
@@ -199,16 +198,16 @@ end
 # derivative p'(z), returning (p,p').
 function eigpoly(b,z,m=length(b)+1)
     d1 = z
-    d1deriv = d2 = one(z);
-    d2deriv = zero(z);
+    d1deriv = d2 = one(z)
+    d2deriv = zero(z)
     for i = 2:m
         b2 = b[i-1]^2
-        d = z * d1 - b2 * d2;
-        dderiv = d1 + z * d1deriv - b2 * d2deriv;
-        d2 = d1;
-        d1 = d;
-        d2deriv = d1deriv;
-        d1deriv = dderiv;
+        d = z * d1 - b2 * d2
+        dderiv = d1 + z * d1deriv - b2 * d2deriv
+        d2 = d1
+        d1 = d
+        d2deriv = d1deriv
+        d1deriv = dderiv
     end
     return (d1, d1deriv)
 end
@@ -221,7 +220,7 @@ function eignewt(b,m,n)
     H = SymTridiagonal(zeros(m), Float64[ b[i] for i in 1:m-1 ])
     lambda0 = sort(eigvals(H))
 
-    lambda = Array(eltype(b), n)
+    lambda = Array{eltype(b)}(n)
     for i = 1:n
         lambda[i] = lambda0[i]
         for k = 1:1000
@@ -244,7 +243,7 @@ function eigvec1(b,z::Number,m=length(b)+1)
     # "cheat" and use the fact that our eigenvector v must have a
     # nonzero first entries (since it is a quadrature weight), so we
     # can set v[1] = 1 to solve for the rest of the components:.
-    v = Array(eltype(b), m)
+    v = Array{eltype(b)}(m)
     v[1] = 1
     if m > 1
         s = v[1]

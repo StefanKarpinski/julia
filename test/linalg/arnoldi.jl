@@ -110,15 +110,15 @@ end
 size(Phi::CPM)=(size(Phi.kraus,1)^2,size(Phi.kraus,3)^2)
 issymmetric(Phi::CPM)=false
 ishermitian(Phi::CPM)=false
-import Base: *
-function *{T<:Base.LinAlg.BlasFloat}(Phi::CPM{T},rho::Vector{T})
+import Base: A_mul_B!
+function A_mul_B!{T<:Base.LinAlg.BlasFloat}(rho2::StridedVector{T},Phi::CPM{T},rho::StridedVector{T})
     rho=reshape(rho,(size(Phi.kraus,3),size(Phi.kraus,3)))
-    rho2=zeros(T,(size(Phi.kraus,1),size(Phi.kraus,1)))
+    rho1=zeros(T,(size(Phi.kraus,1),size(Phi.kraus,1)))
     for s=1:size(Phi.kraus,2)
         As=slice(Phi.kraus,:,s,:)
-        rho2+=As*rho*As'
+        rho1+=As*rho*As'
     end
-    return reshape(rho2,(size(Phi.kraus,1)^2,))
+    return copy!(rho2,rho1)
 end
 
 let
@@ -126,7 +126,7 @@ let
     (Q,R)=qr(randn(100,50))
     Q=reshape(Q,(50,2,50))
     # Construct trace-preserving completely positive map from this
-    Phi=CPM(Q)
+    Phi=CPM(copy(Q))
     (d,v,nconv,numiter,numop,resid) = eigs(Phi,nev=1,which=:LM)
     # Properties: largest eigenvalue should be 1, largest eigenvector, when reshaped as matrix
     # should be a Hermitian positive definite matrix (up to an arbitrary phase)
@@ -158,15 +158,15 @@ let # svds test
     S2 = svd(full(A))
 
     ## singular values match:
-    @test_approx_eq S1[2] S2[2][1:2]
+    @test_approx_eq S1[1][:S] S2[2][1:2]
 
     ## 1st left singular vector
-    s1_left = sign(S1[1][3,1]) * S1[1][:,1]
+    s1_left = sign(S1[1][:U][3,1]) * S1[1][:U][:,1]
     s2_left = sign(S2[1][3,1]) * S2[1][:,1]
     @test_approx_eq s1_left s2_left
 
     ## 1st right singular vector
-    s1_right = sign(S1[3][3,1]) * S1[3][:,1]
+    s1_right = sign(S1[1][:Vt][3,1]) * S1[1][:Vt][:,1]
     s2_right = sign(S2[3][3,1]) * S2[3][:,1]
     @test_approx_eq s1_right s2_right
 
@@ -174,12 +174,22 @@ let # svds test
     debug && println("Issue 10329")
     B = sparse(diagm([1.0, 2.0, 34.0, 5.0, 6.0]))
     S3 = svds(B, ritzvec=false, nsv=2)
-    @test_approx_eq S3[1] [34.0, 6.0]
+    @test_approx_eq S3[1][:S] [34.0, 6.0]
     S4 = svds(B, nsv=2)
-    @test_approx_eq S4[2] [34.0, 6.0]
+    @test_approx_eq S4[1][:S] [34.0, 6.0]
+
+    ## test passing guess for Krylov vectors
+    S1 = svds(A, nsv = 2, u0=rand(eltype(A),size(A,1)))
+    @test_approx_eq S1[1][:S] S2[2][1:2]
+    S1 = svds(A, nsv = 2, v0=rand(eltype(A),size(A,2)))
+    @test_approx_eq S1[1][:S] S2[2][1:2]
+    S1 = svds(A, nsv = 2, u0=rand(eltype(A),size(A,1)), v0=rand(eltype(A),size(A,2)))
+    @test_approx_eq S1[1][:S] S2[2][1:2]
 
     @test_throws ArgumentError svds(A,nsv=0)
     @test_throws ArgumentError svds(A,nsv=20)
+    @test_throws DimensionMismatch svds(A,nsv=2,u0=rand(size(A,1)+1))
+    @test_throws DimensionMismatch svds(A,nsv=2,v0=rand(size(A,2)+1))
 end
 
 debug && println("complex svds")
@@ -189,20 +199,30 @@ let # complex svds test
     S2 = svd(full(A))
 
     ## singular values match:
-    @test_approx_eq S1[2] S2[2][1:2]
+    @test_approx_eq S1[1][:S] S2[2][1:2]
 
     ## left singular vectors
-    s1_left = abs(S1[1][:,1:2])
+    s1_left = abs(S1[1][:U][:,1:2])
     s2_left = abs(S2[1][:,1:2])
     @test_approx_eq s1_left s2_left
 
     ## right singular vectors
-    s1_right = abs(S1[3][:,1:2])
+    s1_right = abs(S1[1][:Vt][:,1:2])
     s2_right = abs(S2[3][:,1:2])
     @test_approx_eq s1_right s2_right
 
+    ## test passing guess for Krylov vectors
+    S1 = svds(A, nsv = 2, u0=rand(eltype(A),size(A,1)))
+    @test_approx_eq S1[1][:S] S2[2][1:2]
+    S1 = svds(A, nsv = 2, v0=rand(eltype(A),size(A,2)))
+    @test_approx_eq S1[1][:S] S2[2][1:2]
+    S1 = svds(A, nsv = 2, u0=rand(eltype(A),size(A,1)), v0=rand(eltype(A),size(A,2)))
+    @test_approx_eq S1[1][:S] S2[2][1:2]
+
     @test_throws ArgumentError svds(A,nsv=0)
     @test_throws ArgumentError svds(A,nsv=20)
+    @test_throws DimensionMismatch svds(A,nsv=2,u0=complex(rand(size(A,1)+1)))
+    @test_throws DimensionMismatch svds(A,nsv=2,v0=complex(rand(size(A,2)+1)))
 end
 
 # test promotion

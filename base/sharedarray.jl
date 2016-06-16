@@ -1,4 +1,5 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
+import .Serializer: serialize_cycle, serialize_type, writetag, UNDEFREF_TAG
 
 type SharedArray{T,N} <: DenseArray{T,N}
     dims::NTuple{N,Int}
@@ -7,7 +8,7 @@ type SharedArray{T,N} <: DenseArray{T,N}
 
     # The segname is currently used only in the test scripts to ensure that
     # the shmem segment has been unlinked.
-    segname::UTF8String
+    segname::String
 
     # Fields below are not to be serialized
     # Local shmem map.
@@ -19,7 +20,7 @@ type SharedArray{T,N} <: DenseArray{T,N}
     # the local partition into the array when viewed as a single dimensional array.
     # this can be removed when @parallel or its equivalent supports looping on
     # a subset of workers.
-    loc_subarr_1d::SubArray{T,1,Array{T,N},Tuple{UnitRange{Int}},true}
+    loc_subarr_1d::SubArray{T,1,Array{T,1},Tuple{UnitRange{Int}},true}
 
     SharedArray(d,p,r,sn) = new(d,p,r,sn)
 end
@@ -67,7 +68,7 @@ function SharedArray(T::Type, dims::NTuple; init=false, pids=Int[])
             shmmem_create_pid = myid()
             s = shm_mmap_array(T, dims, shm_seg_name, JL_O_CREAT | JL_O_RDWR)
         else
-            # The shared array is created on a remote machine....
+            # The shared array is created on a remote machine
             shmmem_create_pid = pids[1]
             remotecall_fetch(pids[1]) do
                 shm_mmap_array(T, dims, shm_seg_name, JL_O_CREAT | JL_O_RDWR)
@@ -77,7 +78,7 @@ function SharedArray(T::Type, dims::NTuple; init=false, pids=Int[])
 
         func_mapshmem = () -> shm_mmap_array(T, dims, shm_seg_name, JL_O_RDWR)
 
-        refs = Array(Future, length(pids))
+        refs = Array{Future}(length(pids))
         for (i, p) in enumerate(pids)
             refs[i] = remotecall(func_mapshmem, p)
         end
@@ -148,18 +149,21 @@ function SharedArray{T,N}(filename::AbstractString, ::Type{T}, dims::NTuple{N,In
 
     # If not supplied, determine the appropriate mode
     have_file = onlocalhost ? isfile(filename) : remotecall_fetch(isfile, pids[1], filename)
-    if mode == nothing
+    if mode === nothing
         mode = have_file ? "r+" : "w+"
     end
     workermode = mode == "w+" ? "r+" : mode  # workers don't truncate!
 
     # Ensure the file will be readable
     mode in ("r", "r+", "w+", "a+") || throw(ArgumentError("mode must be readable, but $mode is not"))
-    init==false || mode in ("r+", "w+", "a+") || throw(ArgumentError("cannot initialize unwritable array (mode = $mode)"))
+    if init !== false
+        typeassert(init, Function)
+        mode in ("r+", "w+", "a+") || throw(ArgumentError("cannot initialize unwritable array (mode = $mode)"))
+    end
     mode == "r" && !isfile(filename) && throw(ArgumentError("file $filename does not exist, but mode $mode cannot create it"))
 
     # Create the file if it doesn't exist, map it if it does
-    refs = Array(Future, length(pids))
+    refs = Array{Future}(length(pids))
     func_mmap = mode -> open(filename, mode) do io
         Mmap.mmap(io, Array{T,N}, dims, offset; shared=true)
     end
@@ -223,8 +227,7 @@ function finalize_refs{T,N}(S::SharedArray{T,N})
         empty!(S.pids)
         empty!(S.refs)
         init_loc_flds(S)
-        finalize(S.s)
-        S.s = Array(T, ntuple(d->0,N))
+        S.s = Array{T}(ntuple(d->0,N))
     end
     S
 end
@@ -238,7 +241,7 @@ linearindexing{S<:SharedArray}(::Type{S}) = LinearFast()
 
 function reshape{T,N}(a::SharedArray{T}, dims::NTuple{N,Int})
     (length(a) != prod(dims)) && throw(DimensionMismatch("dimensions must be consistent with array size"))
-    refs = Array(Future, length(a.pids))
+    refs = Array{Future}(length(a.pids))
     for (i, p) in enumerate(a.pids)
         refs[i] = remotecall(p, a.refs[i], dims) do r,d
             reshape(fetch(r),d)
@@ -281,8 +284,8 @@ convert{TS,TA,N}(::Type{SharedArray{TS,N}}, A::Array{TA,N}) = (S = SharedArray(T
 
 function deepcopy_internal(S::SharedArray, stackdict::ObjectIdDict)
     haskey(stackdict, S) && return stackdict[S]
-    # Note: copy can be used here because SharedArrays are restricted to isbits types
-    R = copy(S)
+    R = SharedArray(eltype(S), size(S); pids = S.pids)
+    copy!(sdata(R), sdata(S))
     stackdict[S] = R
     return R
 end
@@ -339,19 +342,19 @@ function init_loc_flds{T,N}(S::SharedArray{T,N})
         S.loc_subarr_1d = sub_1dim(S, S.pidx)
     else
         S.pidx = 0
-        S.loc_subarr_1d = sub(Array(T, ntuple(d->0,N)), 1:0)
+        S.loc_subarr_1d = sub(Array{T}(ntuple(d->0,N)), 1:0)
     end
 end
 
 
 # Don't serialize s (it is the complete array) and
 # pidx, which is relevant to the current process only
-function serialize(s::SerializationState, S::SharedArray)
-    Serializer.serialize_cycle(s, S) && return
-    Serializer.serialize_type(s, typeof(S))
+function serialize(s::AbstractSerializer, S::SharedArray)
+    serialize_cycle(s, S) && return
+    serialize_type(s, typeof(S))
     for n in SharedArray.name.names
         if n in [:s, :pidx, :loc_subarr_1d]
-            Serializer.writetag(s.io, Serializer.UNDEFREF_TAG)
+            writetag(s.io, UNDEFREF_TAG)
         elseif n == :refs
             v = getfield(S, n)
             if isa(v[1], Future)
@@ -367,8 +370,8 @@ function serialize(s::SerializationState, S::SharedArray)
     end
 end
 
-function deserialize{T,N}(s::SerializationState, t::Type{SharedArray{T,N}})
-    S = invoke(deserialize, Tuple{SerializationState, DataType}, s, t)
+function deserialize{T,N}(s::AbstractSerializer, t::Type{SharedArray{T,N}})
+    S = invoke(deserialize, Tuple{AbstractSerializer, DataType}, s, t)
     init_loc_flds(S)
     S
 end
@@ -430,12 +433,10 @@ function shmem_randn(dims; kwargs...)
 end
 shmem_randn(I::Int...; kwargs...) = shmem_randn(I; kwargs...)
 
-similar(S::SharedArray, T, dims::Dims) = similar(S.s, T, dims)
-similar(S::SharedArray, T) = similar(S.s, T, size(S))
+similar(S::SharedArray, T::Type, dims::Dims) = similar(S.s, T, dims)
+similar(S::SharedArray, T::Type) = similar(S.s, T, size(S))
 similar(S::SharedArray, dims::Dims) = similar(S.s, eltype(S), dims)
 similar(S::SharedArray) = similar(S.s, eltype(S), size(S))
-
-map(f, S::SharedArray) = (S2 = similar(S); S2[:] = S[:]; map!(f, S2); S2)
 
 reduce(f, S::SharedArray) =
     mapreduce(fetch, f,
@@ -479,8 +480,13 @@ complex(S1::SharedArray,S2::SharedArray) = convert(SharedArray, complex(S1.s, S2
 
 function print_shmem_limits(slen)
     try
-        @linux_only pfx = "kernel"
-        @osx_only pfx = "kern.sysv"
+        if is_linux()
+            pfx = "kernel"
+        elseif is_apple()
+            pfx = "kern.sysv"
+        else
+            return
+        end
 
         shmmax_MB = div(parse(Int, split(readstring(`sysctl $(pfx).shmmax`))[end]), 1024*1024)
         page_size = parse(Int, split(readstring(`getconf PAGE_SIZE`))[end])
@@ -493,7 +499,7 @@ function print_shmem_limits(slen)
             "\nIf not, increase system limits and try again."
         )
     catch e
-        nothing # Ignore any errors in this...
+        nothing # Ignore any errors in this
     end
 end
 
@@ -503,7 +509,7 @@ function shm_mmap_array(T, dims, shm_seg_name, mode)
     local A = nothing
 
     if prod(dims) == 0
-        return Array(T, dims)
+        return Array{T}(dims)
     end
 
     try
@@ -523,8 +529,18 @@ end
 
 # platform-specific code
 
-@unix_only begin
+if is_windows()
+function _shm_mmap_array(T, dims, shm_seg_name, mode)
+    readonly = !((mode & JL_O_RDWR) == JL_O_RDWR)
+    create = (mode & JL_O_CREAT) == JL_O_CREAT
+    s = Mmap.Anonymous(shm_seg_name, readonly, create)
+    Mmap.mmap(s, Array{T,length(dims)}, dims, zero(Int64))
+end
 
+# no-op in windows
+shm_unlink(shm_seg_name) = 0
+
+else # !windows
 function _shm_mmap_array(T, dims, shm_seg_name, mode)
     fd_mem = shm_open(shm_seg_name, mode, S_IRUSR | S_IWUSR)
     systemerror("shm_open() failed for " * shm_seg_name, fd_mem < 0)
@@ -544,18 +560,4 @@ end
 shm_unlink(shm_seg_name) = ccall(:shm_unlink, Cint, (Cstring,), shm_seg_name)
 shm_open(shm_seg_name, oflags, permissions) = ccall(:shm_open, Cint, (Cstring, Cint, Cmode_t), shm_seg_name, oflags, permissions)
 
-end # @unix_only
-
-@windows_only begin
-
-function _shm_mmap_array(T, dims, shm_seg_name, mode)
-    readonly = !((mode & JL_O_RDWR) == JL_O_RDWR)
-    create = (mode & JL_O_CREAT) == JL_O_CREAT
-    s = Mmap.Anonymous(shm_seg_name, readonly, create)
-    Mmap.mmap(s, Array{T,length(dims)}, dims, zero(Int64))
-end
-
-# no-op in windows
-shm_unlink(shm_seg_name) = 0
-
-end # @windows_only
+end # os-test

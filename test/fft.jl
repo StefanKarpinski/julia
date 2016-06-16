@@ -11,9 +11,9 @@ m4 = [16.    2     3    13;
 
 true_fft_m4 = [
     34.            34.            34.            34.;
-     7. - 1.im  -5. + 3.im  -3. + 5.im   1. - 7.im;
+     7. - 1.0im  -5. + 3.0im  -3. + 5.0im   1. - 7.0im;
     16.           -16.           -16.            16.;
-     7. + 1.im  -5. - 3.im  -3. - 5.im   1. + 7.im ]
+     7. + 1.0im  -5. - 3.0im  -3. - 5.0im   1. + 7.0im ]
 
 true_fftn_m4 = [
  136.        0          0         0 ;
@@ -31,15 +31,15 @@ b = rand(17,14)
 b[3:6,9:12] = m4
 sm4 = slice(b,3:6,9:12)
 
-m3d = map(Float32,reshape(1:5*3*2, 5, 3, 2))
-true_fftd3_m3d = Array(Float32, 5, 3, 2)
+m3d = map(Float32,copy(reshape(1:5*3*2, 5, 3, 2)))
+true_fftd3_m3d = Array{Float32}(5, 3, 2)
 true_fftd3_m3d[:,:,1] = 17:2:45
 true_fftd3_m3d[:,:,2] = -15
 
 # use invoke to force usage of CTPlan versions even if FFTW is present
 for A in (Array,SubArray)
     for f in (:fft,:ifft,:plan_fft,:plan_ifft)
-        f_ = symbol(string(f, "_"))
+        f_ = Symbol(f, "_")
         @eval begin
             $f_{T,N}(x::$A{T,N}) = invoke($f, Tuple{AbstractArray{T,N}}, x)
             $f_{T,N,R}(x::$A{T,N},r::R) = invoke($f,Tuple{AbstractArray{T,N},R},x,r)
@@ -159,7 +159,7 @@ for (f,fi,pf,pfi) in ((fft,ifft,plan_fft,plan_ifft),
         @test_approx_eq pifft!d3_fftd3_m3d[i] m3d[i]
         end
 
-    end  # if fftw_vendor() != :mkl ...
+    end  # if fftw_vendor() != :mkl
 
     # rfft/rfftn
 
@@ -277,7 +277,7 @@ end
 
 # test inversion, scaling, and pre-allocated variants
 for T in (Complex64, Complex128)
-    for x in (T[1:100;], reshape(T[1:200;], 20,10))
+    for x in (T[1:100;], copy(reshape(T[1:200;], 20,10)))
         y = similar(x)
         for planner in (plan_fft, plan_fft_, plan_ifft, plan_ifft_)
             p = planner(x)

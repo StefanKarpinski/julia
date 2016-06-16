@@ -1,41 +1,14 @@
 // This file is a part of Julia. License is MIT: http://julialang.org/license
 
-/*
-  allocation and garbage collection
-  . non-moving, precise mark and sweep collector
-  . pool-allocates small objects, keeps big objects on a simple list
-*/
-// use mmap instead of malloc to allocate pages. default = off.
-//#define USE_MMAP
-
-// free pages as soon as they are empty. if not defined, then we
-// will wait for the next GC, to allow the space to be reused more
-// efficiently. default = on.
-#include <stdlib.h>
-#include <string.h>
-#ifndef _MSC_VER
-#include <strings.h>
-#endif
-#include <assert.h>
-#include <inttypes.h>
-#include "julia.h"
-#include "julia_internal.h"
-#include "threading.h"
-#ifndef _OS_WINDOWS_
-#include <sys/mman.h>
-#if defined(_OS_DARWIN_) && !defined(MAP_ANONYMOUS)
-#define MAP_ANONYMOUS MAP_ANON
-#endif
-#endif
+#include "gc.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-JL_DEFINE_MUTEX(pagealloc)
 // Protect all access to `finalizer_list`, `finalizer_list_marked` and
 // `to_finalize`.
-JL_DEFINE_MUTEX(finalizers)
+static jl_mutex_t finalizers_lock;
 
 /**
  * Note about GC synchronization:
@@ -45,7 +18,8 @@ JL_DEFINE_MUTEX(finalizers)
  * threads that enters `jl_gc_collect()` at the same time (or later calling
  * from unmanaged code) will wait in `jl_gc_collect()` until the GC is finished.
  *
- * Before starting the mark phase the GC thread calls `jl_gc_signal_begin()`
+ * Before starting the mark phase the GC thread calls `jl_safepoint_gc_start()`
+ * and `jl_gc_wait_for_the_world()`
  * to make sure all the thread are in a safe state for the GC. The function
  * activates the safepoint and wait for all the threads to get ready for the
  * GC (`gc_state != 0`). It also acquires the `finalizers` lock so that no
@@ -68,382 +42,47 @@ JL_DEFINE_MUTEX(finalizers)
  * finalizers in unmanaged (GC safe) mode.
  */
 
-// manipulating mark bits
-
-#define GC_CLEAN 0 // freshly allocated
-#define GC_MARKED 1 // reachable and old
-#define GC_QUEUED 2 // if it is reachable it will be marked as old
-#define GC_MARKED_NOESC (GC_MARKED | GC_QUEUED) // reachable and young
-
-// This struct must be kept in sync with the Julia type of the same name in base/util.jl
-typedef struct {
-    int64_t     allocd;
-    int64_t     freed;
-    uint64_t    malloc;
-    uint64_t    realloc;
-    uint64_t    poolalloc;
-    uint64_t    bigalloc;
-    uint64_t    freecall;
-    uint64_t    total_time;
-    uint64_t    total_allocd;
-    uint64_t    since_sweep;
-    size_t      collect;
-    int         pause;
-    int         full_sweep;
-} GC_Num;
-
-static GC_Num gc_num = {0,0,0,0,0,0,0,0,0,0,0,0,0};
-
-#define collect_interval gc_num.collect
-#define n_pause         gc_num.pause
-#define n_full_sweep    gc_num.full_sweep
-#define allocd_bytes    gc_num.allocd
-#define freed_bytes     gc_num.freed
-#define total_gc_time   gc_num.total_time
-#define total_allocd_bytes gc_num.total_allocd
-#define allocd_bytes_since_sweep gc_num.since_sweep
+jl_gc_num_t gc_num = {0,0,0,0,0,0,0,0,0,0,0,0,0};
 static size_t last_long_collect_interval;
 
-typedef struct _buff_t {
-    union {
-        uintptr_t header;
-        struct _buff_t *next;
-        uintptr_t flags;
-        jl_value_t *type; // 16-bytes aligned
-        struct {
-            uintptr_t gc_bits:2;
-            uintptr_t pooled:1;
-        };
-    };
-    // Work around a bug affecting gcc up to (at least) version 4.4.7
-    // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=36839
-#if !defined(_COMPILER_MICROSOFT_)
-    int _dummy[0];
-#endif
-    char data[];
-} buff_t;
-typedef buff_t gcval_t;
-
-
-// layout for big (>2k) objects
-
-typedef struct _bigval_t {
-    struct _bigval_t *next;
-    struct _bigval_t **prev; // pointer to the next field of the prev entry
-    union {
-        size_t sz;
-        uintptr_t age : 2;
-    };
-    #ifdef _P64 // Add padding so that char data[] below is 64-byte aligned
-        // (8 pointers of 8 bytes each) - (4 other pointers in struct)
-        void *_padding[8 - 4];
-    #else
-        // (16 pointers of 4 bytes each) - (4 other pointers in struct)
-        void *_padding[16 - 4];
-    #endif
-    //struct buff_t <>;
-    union {
-        uintptr_t header;
-        uintptr_t flags;
-        uintptr_t gc_bits:2;
-    };
-    // Work around a bug affecting gcc up to (at least) version 4.4.7
-    // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=36839
-#if !defined(_COMPILER_MICROSOFT_)
-    int _dummy[0];
-#endif
-    // must be 64-byte aligned here, in 32 & 64 bit modes
-    char data[];
-} bigval_t;
-
-#define bigval_header(data) container_of((data), bigval_t, header)
-
-// data structure for tracking malloc'd arrays.
-
-typedef struct _mallocarray_t {
-    jl_array_t *a;
-    struct _mallocarray_t *next;
-} mallocarray_t;
-
-typedef struct _pool_t {
-    gcval_t *freelist;   // root of list of free objects
-    gcval_t *newpages;   // root of list of chunks of free objects
-    uint16_t end_offset; // stored to avoid computing it at each allocation
-    uint16_t osize;      // size of objects in this pool
-    uint16_t nfree;      // number of free objects in page pointed into by free_list
-} pool_t;
-
-// layout for small (<2k) objects
-
-#define GC_PAGE_LG2 14 // log2(size of a page)
-#define GC_PAGE_SZ (1 << GC_PAGE_LG2) // 16k
-#define GC_PAGE_OFFSET (JL_SMALL_BYTE_ALIGNMENT - (sizeof_jl_taggedvalue_t % JL_SMALL_BYTE_ALIGNMENT))
-
-// pool page metadata
-typedef struct _gcpage_t {
-    struct {
-        uint16_t pool_n : 8; // index (into norm_pool) of pool that owns this page
-        uint16_t allocd : 1; // true if an allocation happened in this page since last sweep
-        uint16_t gc_bits : 2; // this is a bitwise | of all gc_bits in this page
-    };
-    uint16_t nfree; // number of free objects in this page.
-                    // invalid if pool that owns this page is allocating objects from this page.
-    uint16_t osize; // size of each object in this page
-    uint16_t fl_begin_offset; // offset of first free object in this page
-    uint16_t fl_end_offset;   // offset of last free object in this page
-    uint16_t thread_n;        // index (into jl_thread_heap) of heap that owns this page
-    char *data;
-    uint8_t *ages;
-} gcpage_t;
-
-#define PAGE_PFL_BEG(p) ((gcval_t**)((p->data) + (p)->fl_begin_offset))
-#define PAGE_PFL_END(p) ((gcval_t**)((p->data) + (p)->fl_end_offset))
-// round an address inside a gcpage's data to its beginning
-#define GC_PAGE_DATA(x) ((char*)((uintptr_t)(x) >> GC_PAGE_LG2 << GC_PAGE_LG2))
-
-// A region is contiguous storage for up to REGION_PG_COUNT naturally aligned GC_PAGE_SZ pages
-// It uses a very naive allocator (see malloc_page & free_page)
-#if defined(_P64) && !defined(_COMPILER_MICROSOFT_)
-#define REGION_PG_COUNT 16*8*4096 // 8G because virtual memory is cheap
-#else
-#define REGION_PG_COUNT 8*4096 // 512M
-#endif
-#define REGION_COUNT 8
-
-typedef struct {
-    // Page layout:
-    //  Padding: GC_PAGE_OFFSET
-    //  Blocks: osize * n
-    //    Tag: sizeof_jl_taggedvalue_t
-    //    Data: <= osize - sizeof_jl_taggedvalue_t
-    char pages[REGION_PG_COUNT][GC_PAGE_SZ]; // must be first, to preserve page alignment
-    uint32_t freemap[REGION_PG_COUNT/32];
-    gcpage_t meta[REGION_PG_COUNT];
-} region_t
-#if !defined(_COMPILER_MICROSOFT_) && !(defined(_COMPILER_MINGW_) && defined(_COMPILER_CLANG_))
-__attribute__((aligned(GC_PAGE_SZ)))
-#endif
-;
-
-static region_t *regions[REGION_COUNT] = {NULL};
-// store a lower bound of the first free page in each region
-static int regions_lb[REGION_COUNT] = {0};
-// an upper bound of the last non-free page
-static int regions_ub[REGION_COUNT] = {REGION_PG_COUNT/32-1};
-
-// Variables that become fields of a thread-local struct in the thread-safe version.
-typedef struct _jl_thread_heap_t {
-    // variable for tracking weak references
-    arraylist_t weak_refs;
-
-    // variables for tracking malloc'd arrays
-    mallocarray_t *mallocarrays;
-    mallocarray_t *mafreelist;
-
-    // variables for tracking big objects
-    bigval_t *big_objects;
-
-    // variables for tracking "remembered set"
-    arraylist_t rem_bindings;
-    arraylist_t _remset[2]; // contains jl_value_t*
-    // lower bound of the number of pointers inside remembered values
-    int remset_nptr;
-    arraylist_t *remset;
-    arraylist_t *last_remset;
-
-    // variables for allocating objects from pools
-#ifdef _P64
-#define N_POOLS 41
-#else
-#define N_POOLS 43
-#endif
-    pool_t norm_pools[N_POOLS];
-} jl_thread_heap_t;
-
-typedef struct {
-    int index;
-    jl_thread_heap_t *heap;
-} jl_each_heap_index_t;
-
-typedef struct {
-    int i;
-    jl_thread_heap_t *heap;
-} jl_single_heap_index_t;
-
-// Include before gc-debug for objprofile
-static const uintptr_t jl_buff_tag = 0x4eade800;
-static void *const jl_malloc_tag = (void*)0xdeadaa01;
-static void *const jl_singleton_tag = (void*)0xdeadaa02;
-
-#define current_heap __current_heap_idx.heap
-#define current_heap_index __current_heap_idx.index
-// This chould trigger a false positive warning with both gcc and clang
-// since the compiler couldn't figure out that the loop is executed at least
-// once.
-// gcc bug: https://gcc.gnu.org/bugzilla/show_bug.cgi?id=68336
-// clang bug: https://llvm.org/bugs/show_bug.cgi?id=25521
-#define _FOR_SINGLE_HEAP(heap)                                          \
-    for (jl_single_heap_index_t __current_heap_idx = {1, heap};         \
-         --__current_heap_idx.i >= 0;)
-#define FOR_CURRENT_HEAP() _FOR_SINGLE_HEAP(jl_thread_heap)
-
-// The following macros are used for accessing these variables.
-// In the multi-threaded version, they establish the desired thread context.
-// In the single-threaded version, they are essentially noops, but nonetheless
-// serve to check that the thread context macros are being used.
-#ifdef JULIA_ENABLE_THREADING
-#define jl_thread_heap (jl_get_ptls_states()->heap)
-#define FOR_EACH_HEAP()                                                 \
-    for (jl_each_heap_index_t __current_heap_idx = {jl_n_threads, NULL}; \
-         --current_heap_index >= 0 &&                                   \
-             ((current_heap = jl_all_heaps[current_heap_index]), 1);)
-#define FOR_HEAP(t_n) _FOR_SINGLE_HEAP(jl_all_heaps[t_n])
-/*}}*/
-#else
-static jl_thread_heap_t _jl_thread_heap;
-static jl_thread_heap_t *const jl_thread_heap = &_jl_thread_heap;
-#define FOR_EACH_HEAP()                                                 \
-    for (jl_each_heap_index_t __current_heap_idx = {1, jl_thread_heap}; \
-         --current_heap_index >= 0;)
-#define FOR_HEAP(t_n) _FOR_SINGLE_HEAP(jl_thread_heap)
-#endif
-
-#define HEAP(x) (current_heap->x)
-#define weak_refs HEAP(weak_refs)
-#define big_objects HEAP(big_objects)
-#define mallocarrays HEAP(mallocarrays)
-#define mafreelist HEAP(mafreelist)
-#define remset HEAP(remset)
-#define remset_nptr HEAP(remset_nptr)
-#define last_remset HEAP(last_remset)
-#define rem_bindings HEAP(rem_bindings)
-#define pools HEAP(norm_pools)
+region_t regions[REGION_COUNT];
 
 // List of marked big objects.  Not per-thread.  Accessed only by master thread.
-static bigval_t *big_objects_marked = NULL;
+bigval_t *big_objects_marked = NULL;
 
 // finalization
-static arraylist_t finalizer_list;
-static arraylist_t finalizer_list_marked;
-static arraylist_t to_finalize;
+arraylist_t finalizer_list;
+arraylist_t finalizer_list_marked;
+arraylist_t to_finalize;
+
+NOINLINE uintptr_t gc_get_stack_ptr(void)
+{
+    return (uintptr_t)jl_get_frame_addr();
+}
 
 #define should_timeout() 0
 
-#define gc_bits(o) (((gcval_t*)(o))->gc_bits)
-#define gc_marked(o)  (((gcval_t*)(o))->gc_bits & GC_MARKED)
-#define _gc_setmark(o, mark_mode) (((gcval_t*)(o))->gc_bits = mark_mode)
-
-static gcpage_t *page_metadata(void *data);
-static void pre_mark(void);
-static void post_mark(arraylist_t *list, int dryrun);
-static region_t *find_region(void *ptr, int maybe);
-
-#define PAGE_INDEX(region, data)              \
-    ((GC_PAGE_DATA((data) - GC_PAGE_OFFSET) - \
-      &(region)->pages[0][0])/GC_PAGE_SZ)
-
-NOINLINE static uintptr_t gc_get_stack_ptr(void)
-{
-    void *dummy = NULL;
-    // The mask is to suppress the compiler warning about returning
-    // address of local variable
-    return (uintptr_t)&dummy & ~(uintptr_t)15;
-}
-
-#include "gc-debug.c"
-
-// Only one thread can be doing the collection right now. That thread set
-// `jl_running_gc` to one on entering the GC and set it back afterward.
-static volatile uint64_t jl_gc_running = 0;
-
 #ifdef JULIA_ENABLE_THREADING
-JL_DLLEXPORT volatile size_t *jl_gc_signal_page = NULL;
-
-static void jl_wait_for_gc(void)
-{
-    while (jl_gc_running) {
-        jl_cpu_pause(); // yield?
-    }
-}
-
-void jl_gc_signal_wait(void)
-{
-    int8_t state = jl_gc_state();
-    jl_get_ptls_states()->gc_state = JL_GC_STATE_WAITING;
-    jl_wait_for_gc();
-    jl_get_ptls_states()->gc_state = state;
-}
-
 static void jl_gc_wait_for_the_world(void)
 {
     for (int i = 0;i < jl_n_threads;i++) {
-        jl_tls_states_t *ptls = jl_all_task_states[i].ptls;
-        while (!ptls->gc_state) {
+        jl_tls_states_t *ptls = jl_all_tls_states[i];
+        // FIXME: The acquire load pairs with the release stores
+        // in the signal handler of safepoint so we are sure that
+        // all the stores on those threads are visible. However,
+        // we're currently not using atomic stores in mutator threads.
+        // We should either use atomic store release there too or use signals
+        // to flush the memory operations on those threads.
+        while (!ptls->gc_state || !jl_atomic_load_acquire(&ptls->gc_state)) {
             jl_cpu_pause(); // yield?
         }
     }
 }
-
-void jl_gc_signal_init(void)
+#else
+static inline void jl_gc_wait_for_the_world(void)
 {
-    // jl_page_size isn't available yet.
-#ifdef _OS_WINDOWS_
-    jl_gc_signal_page = (size_t*)VirtualAlloc(NULL, jl_getpagesize(),
-                                              MEM_COMMIT, PAGE_READONLY);
-#else
-    jl_gc_signal_page = (size_t*)mmap(0, jl_getpagesize(), PROT_READ,
-                                      MAP_NORESERVE | MAP_PRIVATE |
-                                      MAP_ANONYMOUS, -1, 0);
-    if (jl_gc_signal_page == MAP_FAILED)
-        jl_gc_signal_page = NULL;
-#endif
-    if (jl_gc_signal_page == NULL) {
-        jl_printf(JL_STDERR, "could not allocate GC synchronization page\n");
-        gc_debug_critical_error();
-        abort();
-    }
 }
-
-static void jl_gc_signal_begin(void)
-{
-#ifdef __APPLE__
-    // This needs to be after setting `jl_gc_running` so that only one thread
-    // can talk to the signal handler
-    jl_mach_gc_begin();
 #endif
-#ifdef _OS_WINDOWS_
-    DWORD old_prot;
-    VirtualProtect((void*)jl_gc_signal_page, jl_page_size,
-                   PAGE_NOACCESS, &old_prot);
-#else
-    mprotect((void*)jl_gc_signal_page, jl_page_size, PROT_NONE);
-#endif
-    jl_gc_wait_for_the_world();
-    JL_LOCK_NOGC(finalizers);
-}
-
-static void jl_gc_signal_end(void)
-{
-    JL_UNLOCK_NOGC(finalizers);
-#ifdef _OS_WINDOWS_
-    DWORD old_prot;
-    VirtualProtect((void*)jl_gc_signal_page, jl_page_size,
-                   PAGE_READONLY, &old_prot);
-#else
-    mprotect((void*)jl_gc_signal_page, jl_page_size, PROT_READ);
-#endif
-#ifdef __APPLE__
-    jl_mach_gc_end();
-#endif
-}
-#else
-
-#define jl_gc_signal_begin()
-#define jl_gc_signal_end()
-
-#endif
-
-static int jl_gc_finalizers_inhibited; // don't run finalizers during codegen #11956
 
 // malloc wrappers, aligned allocation
 
@@ -511,7 +150,7 @@ static void jl_gc_run_finalizers_in_list(arraylist_t *list)
     size_t len = list->len;
     jl_value_t **items = (jl_value_t**)list->items;
     jl_gc_push_arraylist(list);
-    JL_UNLOCK_NOGC(finalizers);
+    JL_UNLOCK_NOGC(&finalizers_lock);
     for (size_t i = 2;i < len;i += 2) {
         run_finalizer(items[i], items[i + 1]);
     }
@@ -520,9 +159,9 @@ static void jl_gc_run_finalizers_in_list(arraylist_t *list)
 
 static void run_finalizers(void)
 {
-    JL_LOCK_NOGC(finalizers);
+    JL_LOCK_NOGC(&finalizers_lock);
     if (to_finalize.len == 0) {
-        JL_UNLOCK_NOGC(finalizers);
+        JL_UNLOCK_NOGC(&finalizers_lock);
         return;
     }
     arraylist_t copied_list;
@@ -539,16 +178,17 @@ static void run_finalizers(void)
     arraylist_free(&copied_list);
 }
 
-void jl_gc_inhibit_finalizers(int state)
+JL_DLLEXPORT void jl_gc_enable_finalizers(int on)
 {
-    // NOTE: currently only called with the codegen lock held, but might need
-    // more synchronization in the future
-    if (jl_gc_finalizers_inhibited && !state && !jl_in_finalizer) {
-        jl_in_finalizer = 1;
+    jl_tls_states_t *ptls = jl_get_ptls_states();
+    int old_val = ptls->finalizers_inhibited;
+    int new_val = old_val + (on ? -1 : 1);
+    ptls->finalizers_inhibited = new_val;
+    if (!new_val && old_val && !ptls->in_finalizer) {
+        ptls->in_finalizer = 1;
         run_finalizers();
-        jl_in_finalizer = 0;
+        ptls->in_finalizer = 0;
     }
-    jl_gc_finalizers_inhibited = state;
 }
 
 static void schedule_all_finalizers(arraylist_t *flist)
@@ -565,24 +205,24 @@ static void schedule_all_finalizers(arraylist_t *flist)
 
 void jl_gc_run_all_finalizers(void)
 {
-    JL_LOCK_NOGC(finalizers);
+    JL_LOCK_NOGC(&finalizers_lock);
     schedule_all_finalizers(&finalizer_list);
     schedule_all_finalizers(&finalizer_list_marked);
-    JL_UNLOCK_NOGC(finalizers);
+    JL_UNLOCK_NOGC(&finalizers_lock);
     run_finalizers();
 }
 
 JL_DLLEXPORT void jl_gc_add_finalizer(jl_value_t *v, jl_function_t *f)
 {
-    JL_LOCK_NOGC(finalizers);
+    JL_LOCK_NOGC(&finalizers_lock);
     arraylist_push(&finalizer_list, (void*)v);
     arraylist_push(&finalizer_list, (void*)f);
-    JL_UNLOCK_NOGC(finalizers);
+    JL_UNLOCK_NOGC(&finalizers_lock);
 }
 
 JL_DLLEXPORT void jl_finalize(jl_value_t *o)
 {
-    JL_LOCK_NOGC(finalizers);
+    JL_LOCK_NOGC(&finalizers_lock);
     // Copy the finalizers into a temporary list so that code in the finalizer
     // won't change the list as we loop through them.
     // This list is also used as the GC frame when we are running the finalizers
@@ -599,39 +239,12 @@ JL_DLLEXPORT void jl_finalize(jl_value_t *o)
         jl_gc_run_finalizers_in_list(&copied_list);
     }
     else {
-        JL_UNLOCK_NOGC(finalizers);
+        JL_UNLOCK_NOGC(&finalizers_lock);
     }
     arraylist_free(&copied_list);
 }
 
-static region_t *find_region(void *ptr, int maybe)
-{
-    // on 64bit systems we could probably use a single region and remove this loop
-    for (int i = 0; i < REGION_COUNT && regions[i]; i++) {
-        char *begin = &regions[i]->pages[0][0];
-        char *end = begin + sizeof(regions[i]->pages);
-        if ((char*)ptr >= begin && (char*)ptr <= end)
-            return regions[i];
-    }
-    (void)maybe;
-    assert(maybe && "find_region failed");
-    return NULL;
-}
-
-static gcpage_t *page_metadata(void *data)
-{
-    region_t *r = find_region(data, 0);
-    int pg_idx = PAGE_INDEX(r, (char*)data);
-    return &r->meta[pg_idx];
-}
-
-static uint8_t *page_age(gcpage_t *pg)
-{
-    return pg->ages;
-}
-
 #define GC_POOL_END_OFS(osize) ((((GC_PAGE_SZ - GC_PAGE_OFFSET)/(osize)) - 1)*(osize) + GC_PAGE_OFFSET)
-
 
 // GC knobs and self-measurement variables
 static int64_t last_gc_total_bytes = 0;
@@ -646,21 +259,11 @@ static size_t max_collect_interval =  500000000UL;
 
 // global variables for GC stats
 
-#define NS_TO_S(t) ((double)(t/1000)/(1000*1000))
-#define NS2MS(t) ((double)(t/1000)/1000)
-static int64_t live_bytes = 0;
-static int64_t promoted_bytes = 0;
-static size_t current_pg_count = 0;
-static size_t max_pg_count = 0;
-
-JL_DLLEXPORT size_t jl_gc_total_freed_bytes=0;
-#ifdef GC_FINAL_STATS
-static uint64_t max_pause = 0;
-static uint64_t total_sweep_time = 0;
-static uint64_t total_mark_time = 0;
-static uint64_t total_fin_time = 0;
-#endif
-static int sweeping = 0;
+// Resetting the object to a young object, this is used when marking the
+// finalizer list to collect them the next time because the object is very
+// likely dead. This also won't break the GC invariance since these objects
+// are not reachable from anywhere else.
+static int mark_reset_age = 0;
 
 /*
  * The state transition looks like :
@@ -669,28 +272,33 @@ static int sweeping = 0;
  *
  * <-[(quick)sweep]-
  *                 |
- *     ---> GC_QUEUED <--[(quick)sweep && age>promotion]--
- *     |     |     ^                                     |
- *     |   [mark]  |                                     |
- *  [sweep]  |  [write barrier]                          |
- *     |     v     |                                     |
- *     ----- GC_MARKED <--------                         |
- *              |              |                         |
- *              --[quicksweep]--                         |
+ *     ---->  GC_OLD  <--[(quick)sweep && age>promotion]--
+ *     |     |                                           |
+ *     |     |  GC_MARKED (in remset)                    |
+ *     |     |     ^            |                        |
+ *     |   [mark]  |          [mark]                     |
+ *     |     |     |            |                        |
+ *     |     |     |            |                        |
+ *  [sweep]  | [write barrier]  |                        |
+ *     |     v     |            v                        |
+ *     ----- GC_OLD_MARKED <----                         |
+ *              |               ^                        |
+ *              |               |                        |
+ *              --[quicksweep]---                        |
  *                                                       |
  *  ========= above this line objects are old =========  |
  *                                                       |
- *  ----[new]------> GC_CLEAN ------[mark]--------> GC_MARKED_NOESC
+ *  ----[new]------> GC_CLEAN ------[mark]-----------> GC_MARKED
  *                    |    ^                                   |
  *  <-[(quick)sweep]---    |                                   |
  *                         --[(quick)sweep && age<=promotion]---
  */
 
-// A quick sweep is a sweep where sweep_mask == GC_MARKED_NOESC.
-// It means we won't touch GC_MARKED objects (old gen).
+// A quick sweep is a sweep where `!sweep_full`
+// It means we won't touch GC_OLD_MARKED objects (old gen).
 
 // When a reachable object has survived more than PROMOTE_AGE+1 collections
-// it is tagged with GC_QUEUED during sweep and will be promoted on next mark
+// it is tagged with GC_OLD during sweep and will be promoted on next mark
 // because at that point we can know easily if it references young objects.
 // Marked old objects that reference young ones are kept in the remset.
 
@@ -706,224 +314,159 @@ static int sweeping = 0;
 
 static int64_t scanned_bytes; // young bytes scanned while marking
 static int64_t perm_scanned_bytes; // old bytes scanned while marking
-static int prev_sweep_mask = GC_MARKED;
+static int prev_sweep_full = 1;
 
-static size_t array_nbytes(jl_array_t*);
 #define inc_sat(v,s) v = (v) >= s ? s : (v)+1
 
-static inline int gc_setmark_big(void *o, int mark_mode)
+// Full collection heuristics
+static int64_t live_bytes = 0;
+static int64_t promoted_bytes = 0;
+
+static int64_t last_full_live_ub = 0;
+static int64_t last_full_live_est = 0;
+// upper bound and estimated live object sizes
+// This heuristic should be really unlikely to trigger.
+// However, this should be simple enough to trigger a full collection
+// when it's necessary if other heuristics are messed up.
+// It is also possible to take the total memory available into account
+// if necessary.
+STATIC_INLINE int gc_check_heap_size(int64_t sz_ub, int64_t sz_est)
 {
-#ifdef GC_VERIFY
-    if (verifying) {
-        _gc_setmark(o, mark_mode);
+    if (__unlikely(!last_full_live_ub || last_full_live_ub > sz_ub)) {
+        last_full_live_ub = sz_ub;
+    }
+    else if (__unlikely(last_full_live_ub * 3 / 2 < sz_ub)) {
+        return 1;
+    }
+    if (__unlikely(!last_full_live_est || last_full_live_est > sz_est)) {
+        last_full_live_est = sz_est;
+    }
+    else if (__unlikely(last_full_live_est * 2 < sz_est)) {
+        return 1;
+    }
+    return 0;
+}
+
+STATIC_INLINE void gc_update_heap_size(int64_t sz_ub, int64_t sz_est)
+{
+    last_full_live_ub = sz_ub;
+    last_full_live_est = sz_est;
+}
+
+static inline int gc_setmark_big(jl_taggedvalue_t *o, int mark_mode)
+{
+    if (gc_verifying) {
+        o->bits.gc = mark_mode;
         return 0;
     }
-#endif
-    assert(find_region(o,1) == NULL);
+    assert(find_region(o, 1) == NULL);
     bigval_t *hdr = bigval_header(o);
-    int bits = gc_bits(o);
-    if (bits == GC_QUEUED || bits == GC_MARKED)
+    int bits = o->bits.gc;
+    if (mark_reset_age && !gc_marked(bits)) {
+        // Reset the object as if it was just allocated
+        hdr->age = 0;
+        gc_big_object_unlink(hdr);
+        gc_big_object_link(hdr, &jl_thread_heap.big_objects);
+        bits = GC_CLEAN;
         mark_mode = GC_MARKED;
-    if ((mark_mode == GC_MARKED) & (bits != GC_MARKED)) {
-        // Move hdr from big_objects list to big_objects_marked list
-        *hdr->prev = hdr->next;
-        if (hdr->next)
-            hdr->next->prev = hdr->prev;
-        hdr->next = big_objects_marked;
-        hdr->prev = &big_objects_marked;
-        if (big_objects_marked)
-            big_objects_marked->prev = &hdr->next;
-        big_objects_marked = hdr;
     }
-    if (!(bits & GC_MARKED)) {
-        if (mark_mode == GC_MARKED)
+    else {
+        if (gc_old(bits))
+            mark_mode = GC_OLD_MARKED;
+        if ((mark_mode == GC_OLD_MARKED) && (bits != GC_OLD_MARKED)) {
+            // Move hdr from big_objects list to big_objects_marked list
+            gc_big_object_unlink(hdr);
+            gc_big_object_link(hdr, &big_objects_marked);
+        }
+    }
+    if (!gc_marked(bits)) {
+        if (mark_mode == GC_OLD_MARKED)
             perm_scanned_bytes += hdr->sz&~3;
         else
             scanned_bytes += hdr->sz&~3;
         objprofile_count(jl_typeof(jl_valueof(o)),
-                         mark_mode == GC_MARKED, hdr->sz&~3);
+                         mark_mode == GC_OLD_MARKED, hdr->sz&~3);
     }
-    _gc_setmark(o, mark_mode);
+    o->bits.gc = mark_mode;
     verify_val(jl_valueof(o));
     return mark_mode;
 }
 
-static inline int gc_setmark_pool(void *o, int mark_mode)
+static inline int gc_setmark_pool_(jl_taggedvalue_t *o, int mark_mode,
+                                   region_t *r)
 {
-#ifdef GC_VERIFY
-    if (verifying) {
-        _gc_setmark(o, mark_mode);
-        return mark_mode;
-    }
-#endif
-    gcpage_t *page = page_metadata(o);
-    int bits = gc_bits(o);
-    if (bits == GC_QUEUED || bits == GC_MARKED) {
-        mark_mode = GC_MARKED;
-    }
-    if (!(bits & GC_MARKED)) {
-        if (mark_mode == GC_MARKED)
-            perm_scanned_bytes += page->osize;
-        else
-            scanned_bytes += page->osize;
-        objprofile_count(jl_typeof(jl_valueof(o)),
-                         mark_mode == GC_MARKED, page->osize);
-    }
-    _gc_setmark(o, mark_mode);
-    page->gc_bits |= mark_mode;
-    verify_val(jl_valueof(o));
-    return mark_mode;
-}
-
-
-static inline int gc_setmark(jl_value_t *v, int sz, int mark_mode)
-{
-    jl_taggedvalue_t *o = jl_astaggedvalue(v);
-    sz += sizeof_jl_taggedvalue_t;
 #ifdef MEMDEBUG
     return gc_setmark_big(o, mark_mode);
 #endif
-    if (sz <= GC_MAX_SZCLASS + sizeof(buff_t))
-        return gc_setmark_pool(o, mark_mode);
-    else
-        return gc_setmark_big(o, mark_mode);
+    if (gc_verifying) {
+        o->bits.gc = mark_mode;
+        return mark_mode;
+    }
+    jl_gc_pagemeta_t *page = page_metadata_(o, r);
+    int bits = o->bits.gc;
+    if (mark_reset_age && !gc_marked(bits)) {
+        // Reset the object as if it was just allocated
+        bits = GC_CLEAN;
+        mark_mode = GC_MARKED;
+        page->has_young = 1;
+        char *page_begin = gc_page_data(o) + GC_PAGE_OFFSET;
+        int obj_id = (((char*)o) - page_begin) / page->osize;
+        uint8_t *ages = page->ages + obj_id / 8;
+        *ages &= ~(1 << (obj_id % 8));
+    }
+    else if (gc_old(bits)) {
+        mark_mode = GC_OLD_MARKED;
+    }
+    if (!gc_marked(bits)) {
+        if (mark_mode == GC_OLD_MARKED) {
+            perm_scanned_bytes += page->osize;
+            page->nold++;
+        }
+        else {
+            scanned_bytes += page->osize;
+        }
+        objprofile_count(jl_typeof(jl_valueof(o)),
+                         mark_mode == GC_OLD_MARKED, page->osize);
+    }
+    assert(gc_marked(mark_mode));
+    page->has_marked = 1;
+    o->bits.gc = mark_mode;
+    verify_val(jl_valueof(o));
+    return mark_mode;
 }
 
-#define gc_typeof(v) jl_typeof(v)
-#define gc_val_buf(o) ((buff_t*)(((void**)(o))-1))
-
-inline void gc_setmark_buf(void *o, int mark_mode)
+static inline int gc_setmark_pool(jl_taggedvalue_t *o, int mark_mode)
 {
-    buff_t *buf = gc_val_buf(o);
-#ifdef MEMDEBUG
+    return gc_setmark_pool_(o, mark_mode, find_region(o, 0));
+}
+
+static inline int gc_setmark(jl_value_t *v, int sz)
+{
+    jl_taggedvalue_t *o = jl_astaggedvalue(v);
+    if (sz <= GC_MAX_SZCLASS)
+        return gc_setmark_pool(o, GC_MARKED);
+    else
+        return gc_setmark_big(o, GC_MARKED);
+}
+
+inline void gc_setmark_buf(void *o, int mark_mode, size_t minsz)
+{
+    jl_taggedvalue_t *buf = jl_astaggedvalue(o);
+    // If the object is larger than the max pool size it can't be a pool object.
+    // This should be accurate most of the time but there might be corner cases
+    // where the size estimate is a little off so we do a pool lookup to make
+    // sure.
+    if (minsz <= GC_MAX_SZCLASS) {
+        region_t *r = find_region(buf, 1);
+        if (r) {
+            gc_setmark_pool_(buf, mark_mode, r);
+            return;
+        }
+    }
     gc_setmark_big(buf, mark_mode);
-    return;
-#endif
-    if (buf->pooled)
-        gc_setmark_pool(buf, mark_mode);
-    else
-        gc_setmark_big(buf, mark_mode);
 }
 
-static NOINLINE void *malloc_page(void)
-{
-    void *ptr = (void*)0;
-    int i;
-    region_t *region;
-    int region_i = 0;
-    JL_LOCK_NOGC(pagealloc);
-    while(region_i < REGION_COUNT) {
-        region = regions[region_i];
-        if (region == NULL) {
-            size_t alloc_size = sizeof(region_t);
-#ifdef _OS_WINDOWS_
-            char *mem = (char*)VirtualAlloc(NULL, sizeof(region_t) + GC_PAGE_SZ, MEM_RESERVE, PAGE_READWRITE);
-#else
-            if (GC_PAGE_SZ > jl_page_size)
-                alloc_size += GC_PAGE_SZ;
-            char *mem = (char*)mmap(0, alloc_size, PROT_READ | PROT_WRITE, MAP_NORESERVE | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            mem = mem == MAP_FAILED ? NULL : mem;
-#endif
-            if (mem == NULL) {
-                jl_printf(JL_STDERR, "could not allocate pools\n");
-                gc_debug_critical_error();
-                abort();
-            }
-            if (GC_PAGE_SZ > jl_page_size) {
-                // round data pointer up to the nearest GC_PAGE_DATA-aligned boundary
-                // if mmap didn't already do so
-                alloc_size += GC_PAGE_SZ;
-                region = (region_t*)((char*)GC_PAGE_DATA(mem + GC_PAGE_SZ - 1));
-            }
-            else {
-                region = (region_t*)mem;
-            }
-#ifdef _OS_WINDOWS_
-            VirtualAlloc(region->freemap, REGION_PG_COUNT/8, MEM_COMMIT, PAGE_READWRITE);
-            VirtualAlloc(region->meta, REGION_PG_COUNT*sizeof(gcpage_t), MEM_COMMIT, PAGE_READWRITE);
-#endif
-            memset(region->freemap, 0xff, REGION_PG_COUNT/8);
-            regions[region_i] = region;
-        }
-        for(i = regions_lb[region_i]; i < REGION_PG_COUNT/32; i++) {
-            if (region->freemap[i]) break;
-        }
-        if (i == REGION_PG_COUNT/32) {
-            // region full
-            region_i++;
-            continue;
-        }
-        break;
-    }
-    if (region_i >= REGION_COUNT) {
-        jl_printf(JL_STDERR, "increase REGION_COUNT or allocate less memory\n");
-        gc_debug_critical_error();
-        abort();
-    }
-    if (regions_lb[region_i] < i)
-        regions_lb[region_i] = i;
-    if (regions_ub[region_i] < i)
-        regions_ub[region_i] = i;
-
-#if defined(_COMPILER_MINGW_)
-    int j = __builtin_ffs(region->freemap[i]) - 1;
-#elif defined(_COMPILER_MICROSOFT_)
-    unsigned long j;
-    _BitScanForward(&j, region->freemap[i]);
-#else
-    int j = ffs(region->freemap[i]) - 1;
-#endif
-
-    region->freemap[i] &= ~(uint32_t)(1 << j);
-    ptr = region->pages[i*32 + j];
-#ifdef _OS_WINDOWS_
-    VirtualAlloc(ptr, GC_PAGE_SZ, MEM_COMMIT, PAGE_READWRITE);
-#endif
-    current_pg_count++;
-    max_pg_count = max_pg_count < current_pg_count ? current_pg_count : max_pg_count;
-    JL_UNLOCK_NOGC(pagealloc);
-    return ptr;
-}
-
-static void free_page(void *p)
-{
-    int pg_idx = -1;
-    int i;
-    for(i = 0; i < REGION_COUNT && regions[i] != NULL; i++) {
-        pg_idx = PAGE_INDEX(regions[i], (char*)p+GC_PAGE_OFFSET);
-        if (pg_idx >= 0 && pg_idx < REGION_PG_COUNT) break;
-    }
-    assert(i < REGION_COUNT && regions[i] != NULL);
-    region_t *region = regions[i];
-    uint32_t msk = (uint32_t)(1 << (pg_idx % 32));
-    assert(!(region->freemap[pg_idx/32] & msk));
-    region->freemap[pg_idx/32] ^= msk;
-    free(region->meta[pg_idx].ages);
-    // tell the OS we don't need these pages right now
-    size_t decommit_size = GC_PAGE_SZ;
-    if (GC_PAGE_SZ < jl_page_size) {
-        // ensure so we don't release more memory than intended
-        size_t n_pages = (GC_PAGE_SZ + jl_page_size - 1) / GC_PAGE_SZ;
-        decommit_size = jl_page_size;
-        p = (void*)((uintptr_t)&region->pages[pg_idx][0] & ~(jl_page_size - 1)); // round down to the nearest page
-        pg_idx = PAGE_INDEX(region, (char*)p+GC_PAGE_OFFSET);
-        if (pg_idx + n_pages > REGION_PG_COUNT) goto no_decommit;
-        for (; n_pages--; pg_idx++) {
-            msk = (uint32_t)(1 << ((pg_idx % 32)));
-            if (!(region->freemap[pg_idx/32] & msk)) goto no_decommit;
-        }
-    }
-#ifdef _OS_WINDOWS_
-    VirtualFree(p, decommit_size, MEM_DECOMMIT);
-#else
-    madvise(p, decommit_size, MADV_DONTNEED);
-#endif
-no_decommit:
-    if (regions_lb[i] > pg_idx/32) regions_lb[i] = pg_idx/32;
-    current_pg_count--;
-}
-
-#define should_collect() (__unlikely(allocd_bytes>0))
+#define should_collect() (__unlikely(gc_num.allocd>0))
 
 static inline int maybe_collect(void)
 {
@@ -942,41 +485,44 @@ JL_DLLEXPORT jl_weakref_t *jl_gc_new_weakref(jl_value_t *value)
     jl_weakref_t *wr = (jl_weakref_t*)jl_gc_alloc_1w();
     jl_set_typeof(wr, jl_weakref_type);
     wr->value = value;  // NOTE: wb not needed here
-    FOR_CURRENT_HEAP ()
-        arraylist_push(&weak_refs, wr);
+    arraylist_push(&jl_thread_heap.weak_refs, wr);
     return wr;
 }
 
 static void sweep_weak_refs(void)
 {
-    FOR_EACH_HEAP () {
-        size_t n=0, ndel=0, l=weak_refs.len;
-        jl_weakref_t *wr;
-        void **lst = weak_refs.items;
-        void *tmp;
-#define SWAP_wr(a,b) (tmp=a,a=b,b=tmp,1)
+    for (int i = 0;i < jl_n_threads;i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[i];
+        size_t n = 0;
+        size_t ndel = 0;
+        size_t l = ptls->heap.weak_refs.len;
+        void **lst = ptls->heap.weak_refs.items;
         if (l == 0)
             continue;
-        do {
-            wr = (jl_weakref_t*)lst[n];
-            if (gc_marked(jl_astaggedvalue(wr))) {
+        while (1) {
+            jl_weakref_t *wr = (jl_weakref_t*)lst[n];
+            if (gc_marked(jl_astaggedvalue(wr)->bits.gc)) {
                 // weakref itself is alive
-                if (!gc_marked(jl_astaggedvalue(wr->value)))
+                if (!gc_marked(jl_astaggedvalue(wr->value)->bits.gc))
                     wr->value = (jl_value_t*)jl_nothing;
                 n++;
             }
             else {
                 ndel++;
             }
-        } while ((n < l-ndel) && SWAP_wr(lst[n],lst[n+ndel]));
-
-        weak_refs.len -= ndel;
+            if (n >= l - ndel)
+                break;
+            void *tmp = lst[n];
+            lst[n] = lst[n + ndel];
+            lst[n+ndel] = tmp;
+        }
+        ptls->heap.weak_refs.len -= ndel;
     }
 }
 
 // big value list
 
-static NOINLINE void *alloc_big(size_t sz)
+static NOINLINE jl_taggedvalue_t *alloc_big(size_t sz)
 {
     maybe_collect();
     size_t offs = offsetof(bigval_t, header);
@@ -986,113 +532,98 @@ static NOINLINE void *alloc_big(size_t sz)
     bigval_t *v = (bigval_t*)malloc_cache_align(allocsz);
     if (v == NULL)
         jl_throw(jl_memory_exception);
-    jl_atomic_fetch_add(&allocd_bytes, allocsz);
+    jl_atomic_fetch_add(&gc_num.allocd, allocsz);
     gc_num.bigalloc++;
 #ifdef MEMDEBUG
     memset(v, 0xee, allocsz);
 #endif
     v->sz = allocsz;
-    v->flags = 0;
+    v->header = 0;
     v->age = 0;
-    FOR_CURRENT_HEAP () {
-        v->next = big_objects;
-        v->prev = &big_objects;
-        if (v->next)
-            v->next->prev = &v->next;
-        big_objects = v;
-    }
-    return (void*)&v->header;
+    gc_big_object_link(v, &jl_thread_heap.big_objects);
+    return (jl_taggedvalue_t*)&v->header;
 }
-
-static int big_total;
-static int big_freed;
-static int big_reset;
 
 // Sweep list rooted at *pv, removing and freeing any unmarked objects.
 // Return pointer to last `next` field in the culled list.
-static bigval_t **sweep_big_list(int sweep_mask, bigval_t **pv)
+static bigval_t **sweep_big_list(int sweep_full, bigval_t **pv)
 {
     bigval_t *v = *pv;
     while (v != NULL) {
         bigval_t *nxt = v->next;
-        if (gc_marked(&v->header)) {
+        int bits = v->bits.gc;
+        int old_bits = bits;
+        if (gc_marked(bits)) {
             pv = &v->next;
             int age = v->age;
-            int bits = gc_bits(&v->header);
-            if (age >= PROMOTE_AGE) {
-                if (sweep_mask == GC_MARKED || bits == GC_MARKED_NOESC) {
-                    bits = GC_QUEUED;
+            if (age >= PROMOTE_AGE || bits == GC_OLD_MARKED) {
+                if (sweep_full || bits == GC_MARKED) {
+                    bits = GC_OLD;
                 }
             }
             else {
                 inc_sat(age, PROMOTE_AGE);
                 v->age = age;
-                if ((sweep_mask & bits) == sweep_mask) {
-                    bits = GC_CLEAN;
-                    big_reset++;
-                }
+                bits = GC_CLEAN;
             }
-            gc_bits(&v->header) = bits;
+            v->bits.gc = bits;
         }
         else {
             // Remove v from list and free it
             *pv = nxt;
             if (nxt)
                 nxt->prev = pv;
-            freed_bytes += v->sz&~3;
+            gc_num.freed += v->sz&~3;
 #ifdef MEMDEBUG
             memset(v, 0xbb, v->sz&~3);
 #endif
             jl_free_aligned(v);
-            big_freed++;
         }
-        big_total++;
+        gc_time_count_big(old_bits, bits);
         v = nxt;
     }
     return pv;
 }
 
-static void sweep_big(int sweep_mask)
+static void sweep_big(int sweep_full)
 {
-    FOR_EACH_HEAP ()
-        sweep_big_list(sweep_mask, &big_objects);
-    if (sweep_mask == GC_MARKED) {
-        bigval_t **last_next = sweep_big_list(sweep_mask, &big_objects_marked);
+    gc_time_big_start();
+    for (int i = 0;i < jl_n_threads;i++)
+        sweep_big_list(sweep_full, &jl_all_tls_states[i]->heap.big_objects);
+    if (sweep_full) {
+        bigval_t **last_next = sweep_big_list(sweep_full, &big_objects_marked);
         // Move all survivors from big_objects_marked list to big_objects list.
-        FOR_CURRENT_HEAP () {
-            if (big_objects)
-                big_objects->prev = last_next;
-            *last_next = big_objects;
-            big_objects = big_objects_marked;
-            if (big_objects)
-                big_objects->prev = &big_objects;
-        }
+        if (jl_thread_heap.big_objects)
+            jl_thread_heap.big_objects->prev = last_next;
+        *last_next = jl_thread_heap.big_objects;
+        jl_thread_heap.big_objects = big_objects_marked;
+        if (jl_thread_heap.big_objects)
+            jl_thread_heap.big_objects->prev = &jl_thread_heap.big_objects;
         big_objects_marked = NULL;
     }
+    gc_time_big_end();
 }
 
 // tracking Arrays with malloc'd storage
 
 void jl_gc_track_malloced_array(jl_array_t *a)
 {
-    FOR_CURRENT_HEAP () {
-        mallocarray_t *ma;
-        if (mafreelist == NULL) {
-            ma = (mallocarray_t*)malloc(sizeof(mallocarray_t));
-        }
-        else {
-            ma = mafreelist;
-            mafreelist = ma->next;
-        }
-        ma->a = a;
-        ma->next = mallocarrays;
-        mallocarrays = ma;
+    mallocarray_t *ma;
+    if (jl_thread_heap.mafreelist == NULL) {
+        ma = (mallocarray_t*)malloc(sizeof(mallocarray_t));
     }
+    else {
+        ma = jl_thread_heap.mafreelist;
+        jl_thread_heap.mafreelist = ma->next;
+    }
+    ma->a = a;
+    ma->next = jl_thread_heap.mallocarrays;
+    jl_thread_heap.mallocarrays = ma;
 }
 
 void jl_gc_count_allocd(size_t sz)
 {
-    allocd_bytes += sz;
+    gc_num.allocd += sz;
 }
 
 static size_t array_nbytes(jl_array_t *a)
@@ -1113,80 +644,80 @@ static void jl_gc_free_array(jl_array_t *a)
             jl_free_aligned(d);
         else
             free(d);
-        freed_bytes += array_nbytes(a);
+        gc_num.freed += array_nbytes(a);
     }
 }
 
-static int mallocd_array_total;
-static int mallocd_array_freed;
-
-
 static void sweep_malloced_arrays(void)
 {
-    FOR_EACH_HEAP () {
-        mallocarray_t *ma = mallocarrays;
-        mallocarray_t **pma = &mallocarrays;
+    gc_time_mallocd_array_start();
+    for (int t_i = 0;t_i < jl_n_threads;t_i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[t_i];
+        mallocarray_t *ma = ptls->heap.mallocarrays;
+        mallocarray_t **pma = &ptls->heap.mallocarrays;
         while (ma != NULL) {
             mallocarray_t *nxt = ma->next;
-            if (gc_marked(jl_astaggedvalue(ma->a))) {
+            int bits = jl_astaggedvalue(ma->a)->bits.gc;
+            if (gc_marked(bits)) {
                 pma = &ma->next;
             }
             else {
                 *pma = nxt;
                 assert(ma->a->flags.how == 2);
                 jl_gc_free_array(ma->a);
-                ma->next = mafreelist;
-                mafreelist = ma;
-                mallocd_array_freed++;
+                ma->next = ptls->heap.mafreelist;
+                ptls->heap.mafreelist = ma;
             }
-            mallocd_array_total++;
+            gc_time_count_mallocd_array(bits);
             ma = nxt;
         }
     }
+    gc_time_mallocd_array_end();
 }
 
 // pool allocation
-static inline gcval_t *reset_page(pool_t *p, gcpage_t *pg, gcval_t *fl)
+static inline jl_taggedvalue_t *reset_page(jl_gc_pool_t *p, jl_gc_pagemeta_t *pg, jl_taggedvalue_t *fl)
 {
-    pg->gc_bits = 0;
     pg->nfree = (GC_PAGE_SZ - GC_PAGE_OFFSET) / p->osize;
-    FOR_HEAP (pg->thread_n)
-        pg->pool_n = p - pools;
-    memset(page_age(pg), 0, LLT_ALIGN(GC_PAGE_SZ / p->osize, 8));
-    gcval_t *beg = (gcval_t*)(pg->data + GC_PAGE_OFFSET);
-    gcval_t *end = (gcval_t*)((char*)beg + (pg->nfree - 1)*p->osize);
+    jl_tls_states_t *ptls = jl_all_tls_states[pg->thread_n];
+    pg->pool_n = p - ptls->heap.norm_pools;
+    memset(pg->ages, 0, GC_PAGE_SZ / 8 / p->osize + 1);
+    jl_taggedvalue_t *beg = (jl_taggedvalue_t*)(pg->data + GC_PAGE_OFFSET);
+    jl_taggedvalue_t *end = (jl_taggedvalue_t*)((char*)beg + (pg->nfree - 1)*p->osize);
     end->next = fl;
-    pg->allocd = 0;
+    pg->has_young = 0;
+    pg->has_marked = 0;
     pg->fl_begin_offset = GC_PAGE_OFFSET;
     pg->fl_end_offset = (char*)end - (char*)beg + GC_PAGE_OFFSET;
     return beg;
 }
 
-static NOINLINE void add_page(pool_t *p)
+static NOINLINE void add_page(jl_gc_pool_t *p)
 {
-    char *data = (char*)malloc_page();
+    char *data = (char*)jl_gc_alloc_page();
     if (data == NULL)
         jl_throw(jl_memory_exception);
-    gcpage_t *pg = page_metadata(data + GC_PAGE_OFFSET);
+    jl_gc_pagemeta_t *pg = page_metadata(data + GC_PAGE_OFFSET);
     pg->data = data;
     pg->osize = p->osize;
-    pg->ages = (uint8_t*)malloc(LLT_ALIGN(GC_PAGE_SZ / p->osize, 8));
+    pg->ages = (uint8_t*)malloc(GC_PAGE_SZ / 8 / p->osize + 1);
     pg->thread_n = ti_tid;
-    gcval_t *fl = reset_page(p, pg, p->newpages);
+    jl_taggedvalue_t *fl = reset_page(p, pg, p->newpages);
     p->newpages = fl;
 }
 
-static inline void *__pool_alloc(pool_t *p, int osize, int end_offset)
+static inline jl_taggedvalue_t *__pool_alloc(jl_gc_pool_t *p, int osize,
+                                             int end_offset)
 {
 #ifdef MEMDEBUG
-    assert(0 && "Should not be using pools in MEMDEBUG mode");
+    return alloc_big(osize);
 #endif
-    gcval_t *v, *end;
+    jl_taggedvalue_t *v, *end;
     // FIXME - need JL_ATOMIC_FETCH_AND_ADD here
-    if (__unlikely((allocd_bytes += osize) >= 0) || gc_debug_check_pool()) {
-        //allocd_bytes -= osize;
+    if (__unlikely((gc_num.allocd += osize) >= 0) || gc_debug_check_pool()) {
+        //gc_num.allocd -= osize;
         jl_gc_collect(0);
-        //allocd_bytes += osize;
+        //gc_num.allocd += osize;
     }
     else {
         jl_gc_safepoint();
@@ -1195,17 +726,17 @@ static inline void *__pool_alloc(pool_t *p, int osize, int end_offset)
     // first try to use the freelist
     v = p->freelist;
     if (v) {
-        gcval_t *next = v->next;
-        v->flags = 0;
+        jl_taggedvalue_t *next = v->next;
+        v->header = 0;
         p->nfree--;
         p->freelist = next;
-        if (__unlikely(GC_PAGE_DATA(v) != GC_PAGE_DATA(next))) {
+        if (__unlikely(gc_page_data(v) != gc_page_data(next))) {
             // we only update pg's fields when the freelist changes page
             // since pg's metadata is likely not in cache
-            gcpage_t *pg = page_metadata(v);
+            jl_gc_pagemeta_t *pg = page_metadata(v);
             assert(pg->osize == p->osize);
             pg->nfree = 0;
-            pg->allocd = 1;
+            pg->has_young = 1;
             if (next)
                 p->nfree = page_metadata(next)->nfree;
         }
@@ -1217,37 +748,37 @@ static inline void *__pool_alloc(pool_t *p, int osize, int end_offset)
         add_page(p);
         v = p->newpages;
     }
-    end = (gcval_t*)&(GC_PAGE_DATA(v)[end_offset]);
+    end = (jl_taggedvalue_t*)&(gc_page_data(v)[end_offset]);
     if (__likely(v != end)) {
-        p->newpages = (gcval_t*)((char*)v + osize);
+        p->newpages = (jl_taggedvalue_t*)((char*)v + osize);
     }
     else {
         // like the freelist case, but only update the page metadata when it is full
-        gcpage_t *pg = page_metadata(v);
+        jl_gc_pagemeta_t *pg = page_metadata(v);
         assert(pg->osize == p->osize);
         pg->nfree = 0;
-        pg->allocd = 1;
+        pg->has_young = 1;
         p->newpages = v->next;
     }
-    v->flags = 0;
+    v->header = 0;
     return v;
 }
 
 // use this variant when osize is statically known
 // and is definitely in sizeclasses
 // GC_POOL_END_OFS uses an integer division
-static inline void *_pool_alloc(pool_t *p, int osize)
+static inline jl_taggedvalue_t *_pool_alloc(jl_gc_pool_t *p, int osize)
 {
     return __pool_alloc(p, osize, GC_POOL_END_OFS(osize));
 }
 
-static inline void *pool_alloc(pool_t *p)
+static inline jl_taggedvalue_t *pool_alloc(jl_gc_pool_t *p)
 {
     return __pool_alloc(p, p->osize, p->end_offset);
 }
 
 // pools are 16376 bytes large (GC_POOL_SZ - GC_PAGE_OFFSET)
-static const int sizeclasses[N_POOLS] = {
+static const int sizeclasses[JL_GC_N_POOLS] = {
 #ifdef _P64
     8,
 #else
@@ -1295,92 +826,75 @@ static inline int szclass(size_t sz)
         return 16 - 16376 / 4 / LLT_ALIGN(sz, 16 * 4) + 16 + N;
     if (sz <= 1008)
         return 16 - 16376 / 2 / LLT_ALIGN(sz, 16 * 2) + 24 + N;
-    assert(sz <= GC_MAX_SZCLASS + sizeof(buff_t) && sizeclasses[N_POOLS-1] == GC_MAX_SZCLASS + sizeof(buff_t));
+    assert(sz <= GC_MAX_SZCLASS + sizeof(jl_taggedvalue_t) && sizeclasses[JL_GC_N_POOLS-1] == GC_MAX_SZCLASS + sizeof(jl_taggedvalue_t));
     return     16 - 16376 / 1 / LLT_ALIGN(sz, 16 * 1) + 32 + N;
 }
 
 // sweep phase
 
-static int skipped_pages = 0;
-static int total_pages = 0;
-static int freed_pages = 0;
-static int lazy_freed_pages = 0;
-static int page_done = 0;
-static gcval_t **sweep_page(pool_t *p, gcpage_t *pg, gcval_t **pfl,int,int);
-static void sweep_pool_region(gcval_t ***pfl, int region_i, int sweep_mask)
-{
-    region_t *region = regions[region_i];
-
-    // the actual sweeping
-    int ub = 0;
-    int lb = regions_lb[region_i];
-    for (int pg_i = 0; pg_i <= regions_ub[region_i]; pg_i++) {
-        uint32_t line = region->freemap[pg_i];
-        if (!!~line) {
-            ub = pg_i;
-            for (int j = 0; j < 32; j++) {
-                if (!((line >> j) & 1)) {
-                    gcpage_t *pg = &region->meta[pg_i*32 + j];
-                    int p_n = pg->pool_n;
-                    int t_n = pg->thread_n;
-                    pool_t *p = NULL;
-                    FOR_HEAP (t_n)
-                        p = &pools[p_n];
-                    int osize = pg->osize;
-                    pfl[t_n * N_POOLS + p_n] = sweep_page(p, pg, pfl[t_n * N_POOLS + p_n], sweep_mask, osize);
-                }
-            }
-        }
-        else if (pg_i < lb) {
-            lb = pg_i;
-        }
-    }
-    regions_ub[region_i] = ub;
-    regions_lb[region_i] = lb;
-}
+int64_t lazy_freed_pages = 0;
 
 // Returns pointer to terminal pointer of list rooted at *pfl.
-static gcval_t **sweep_page(pool_t *p, gcpage_t *pg, gcval_t **pfl, int sweep_mask, int osize)
+static jl_taggedvalue_t **sweep_page(jl_gc_pool_t *p, jl_gc_pagemeta_t *pg, jl_taggedvalue_t **pfl, int sweep_full, int osize)
 {
-    int freedall;
-    gcval_t **prev_pfl = pfl;
-    gcval_t *v;
-    size_t old_nfree = 0, nfree = 0;
-    int pg_freedall = 0, pg_total = 0, pg_skpd = 0;
-    int obj_per_page = (GC_PAGE_SZ - GC_PAGE_OFFSET)/osize;
     char *data = pg->data;
-    uint8_t *ages = page_age(pg);
-    v = (gcval_t*)(data + GC_PAGE_OFFSET);
+    uint8_t *ages = pg->ages;
+    jl_taggedvalue_t *v = (jl_taggedvalue_t*)(data + GC_PAGE_OFFSET);
     char *lim = (char*)v + GC_PAGE_SZ - GC_PAGE_OFFSET - osize;
-    freedall = 1;
-    old_nfree += pg->nfree;
+    size_t old_nfree = pg->nfree;
+    size_t nfree;
 
-    if (pg->gc_bits == GC_MARKED) {
-        // this page only contains GC_MARKED and free cells
-        // if we are doing a quick sweep and nothing has been allocated inside since last sweep
-        // we can skip it
-        if (sweep_mask == GC_MARKED_NOESC && !pg->allocd) {
-            // the position of the freelist begin/end in this page is stored in its metadata
+    int freedall = 1;
+    int pg_skpd = 1;
+    if (!pg->has_marked) {
+        // lazy version: (empty) if the whole page was already unused, free it
+        // eager version: (freedall) free page as soon as possible
+        // the eager one uses less memory.
+        // FIXME - need to do accounting on a per-thread basis
+        // on quick sweeps, keep a few pages empty but allocated for performance
+        if (!sweep_full && lazy_freed_pages <= default_collect_interval / GC_PAGE_SZ) {
+            jl_taggedvalue_t *begin = reset_page(p, pg, 0);
+            jl_taggedvalue_t **pend = (jl_taggedvalue_t**)((char*)begin + ((int)pg->nfree - 1)*osize);
+            jl_taggedvalue_t *npg = p->newpages;
+            *pend = npg;
+            p->newpages = begin;
+            begin->next = (jl_taggedvalue_t*)0;
+            lazy_freed_pages++;
+        }
+        else {
+            jl_gc_free_page(data);
+        }
+        nfree = (GC_PAGE_SZ - GC_PAGE_OFFSET) / osize;
+        goto done;
+    }
+    // For quick sweep, we might be able to skip the page if the page doesn't
+    // have any young live cell before marking.
+    if (!sweep_full && !pg->has_young) {
+        assert(!prev_sweep_full || pg->prev_nold >= pg->nold);
+        if (!prev_sweep_full || pg->prev_nold == pg->nold) {
+            // the position of the freelist begin/end in this page
+            // is stored in its metadata
             if (pg->fl_begin_offset != (uint16_t)-1) {
-                *pfl = (gcval_t*)PAGE_PFL_BEG(pg);
-                pfl = prev_pfl = PAGE_PFL_END(pg);
+                *pfl = page_pfl_beg(pg);
+                pfl = (jl_taggedvalue_t**)page_pfl_end(pg);
             }
-            pg_skpd++;
             freedall = 0;
-            goto free_page;
+            nfree = pg->nfree;
+            goto done;
         }
     }
-    else if (pg->gc_bits == GC_CLEAN) {
-        goto free_page;
-    }
 
+    pg_skpd = 0;
     {  // scope to avoid clang goto errors
+        int has_marked = 0;
+        int has_young = 0;
+        int16_t prev_nold = 0;
         int pg_nfree = 0;
-        gcval_t **pfl_begin = NULL;
+        jl_taggedvalue_t **pfl_begin = NULL;
         uint8_t msk = 1; // mask for the age bit in the current age byte
         while ((char*)v <= lim) {
-            int bits = gc_bits(v);
-            if (!(bits & GC_MARKED)) {
+            int bits = v->bits.gc;
+            if (!gc_marked(bits)) {
                 *pfl = v;
                 pfl = &v->next;
                 pfl_begin = pfl_begin ? pfl_begin : pfl;
@@ -1388,18 +902,24 @@ static gcval_t **sweep_page(pool_t *p, gcpage_t *pg, gcval_t **pfl, int sweep_ma
                 *ages &= ~msk;
             }
             else { // marked young or old
-                if (*ages & msk) { // old enough
-                    if (sweep_mask == GC_MARKED || bits == GC_MARKED_NOESC) {
-                        gc_bits(v) = GC_QUEUED; // promote
+                if (*ages & msk || bits == GC_OLD_MARKED) { // old enough
+                    // `!age && bits == GC_OLD_MARKED` is possible for
+                    // non-first-class objects like `jl_binding_t`
+                    if (sweep_full || bits == GC_MARKED) {
+                        bits = v->bits.gc = GC_OLD; // promote
                     }
+                    prev_nold++;
                 }
-                else if ((sweep_mask & bits) == sweep_mask) {
-                    gc_bits(v) = GC_CLEAN; // unmark
+                else {
+                    assert(bits == GC_MARKED);
+                    bits = v->bits.gc = GC_CLEAN; // unmark
+                    has_young = 1;
                 }
+                has_marked |= gc_marked(bits);
                 *ages |= msk;
                 freedall = 0;
             }
-            v = (gcval_t*)((char*)v + osize);
+            v = (jl_taggedvalue_t*)((char*)v + osize);
             msk <<= 1;
             if (!msk) {
                 msk = 1;
@@ -1407,143 +927,115 @@ static gcval_t **sweep_page(pool_t *p, gcpage_t *pg, gcval_t **pfl, int sweep_ma
             }
         }
 
+        assert(!freedall);
+        pg->has_marked = has_marked;
+        pg->has_young = has_young;
         pg->fl_begin_offset = pfl_begin ? (char*)pfl_begin - data : (uint16_t)-1;
         pg->fl_end_offset = pfl_begin ? (char*)pfl - data : (uint16_t)-1;
 
         pg->nfree = pg_nfree;
-        page_done++;
-        pg->allocd = 0;
-    }
- free_page:
-    pg_freedall += freedall;
-
-    // lazy version: (empty) if the whole page was already unused, free it
-    // eager version: (freedall) free page as soon as possible
-    // the eager one uses less memory.
-    pg_total++;
-    if (freedall) {
-        // FIXME - need to do accounting on a per-thread basis
-        // on quick sweeps, keep a few pages empty but allocated for performance
-        if (sweep_mask == GC_MARKED_NOESC && lazy_freed_pages <= default_collect_interval/GC_PAGE_SZ) {
-            gcval_t *begin = reset_page(p, pg, 0);
-            gcval_t **pend = (gcval_t**)((char*)begin + ((int)pg->nfree - 1)*osize);
-            gcval_t *npg = p->newpages;
-            *pend = npg;
-            p->newpages = begin;
-            begin->next = (gcval_t*)0;
-            lazy_freed_pages++;
-            pfl = prev_pfl;
+        if (sweep_full) {
+            pg->nold = 0;
+            pg->prev_nold = prev_nold;
         }
-        else {
-            pfl = prev_pfl;
-#ifdef MEMDEBUG
-            memset(pg->data, 0xbb, GC_PAGE_SZ);
-#endif
-            free_page(data);
-#ifdef MEMDEBUG
-            memset(pg, 0xbb, sizeof(gcpage_t));
-#endif
-        }
-        freed_pages++;
-        nfree += obj_per_page;
     }
-    else {
-        if (sweep_mask == GC_MARKED)
-            pg->gc_bits = GC_CLEAN;
-        if (sweep_mask == GC_MARKED_NOESC)
-            pg->gc_bits = GC_MARKED;
-        nfree += pg->nfree;
-    }
+    nfree = pg->nfree;
 
-    skipped_pages += pg_skpd;
-    total_pages += pg_total;
-    freed_bytes += (nfree - old_nfree)*osize;
+done:
+    gc_time_count_page(freedall, pg_skpd);
+    gc_num.freed += (nfree - old_nfree) * osize;
     return pfl;
 }
 
-static void gc_sweep_once(int sweep_mask)
+static void sweep_pool_region(jl_taggedvalue_t ***pfl, int region_i, int sweep_full)
 {
-#ifdef GC_TIME
-    double t0 = jl_clock_now();
-    mallocd_array_total = 0;
-    mallocd_array_freed = 0;
-#endif
-    sweep_malloced_arrays();
-#ifdef GC_TIME
-    jl_printf(JL_STDOUT, "GC sweep arrays %.2f (freed %d/%d)\n", (jl_clock_now() - t0)*1000, mallocd_array_freed, mallocd_array_total);
-    t0 = jl_clock_now();
-    big_total = 0;
-    big_freed = 0;
-    big_reset = 0;
-#endif
-    sweep_big(sweep_mask);
-#ifdef GC_TIME
-    jl_printf(JL_STDOUT, "GC sweep big %.2f (freed %d/%d with %d rst)\n", (jl_clock_now() - t0)*1000, big_freed, big_total, big_reset);
-#endif
+    region_t *region = &regions[region_i];
+
+    // the actual sweeping
+    int ub = 0;
+    int lb = region->lb;
+    for (int pg_i = 0; pg_i <= region->ub; pg_i++) {
+        uint32_t line = region->allocmap[pg_i];
+        if (line) {
+            ub = pg_i;
+            for (int j = 0; j < 32; j++) {
+                if ((line >> j) & 1) {
+                    jl_gc_pagemeta_t *pg = &region->meta[pg_i*32 + j];
+                    int p_n = pg->pool_n;
+                    int t_n = pg->thread_n;
+                    jl_tls_states_t *ptls = jl_all_tls_states[t_n];
+                    jl_gc_pool_t *p = &ptls->heap.norm_pools[p_n];
+                    int osize = pg->osize;
+                    pfl[t_n * JL_GC_N_POOLS + p_n] = sweep_page(p, pg, pfl[t_n * JL_GC_N_POOLS + p_n], sweep_full, osize);
+                }
+            }
+        }
+        else if (pg_i < lb) {
+            lb = pg_i;
+        }
+    }
+    region->ub = ub;
+    region->lb = lb;
 }
 
-// returns 0 if not finished
-static int gc_sweep_inc(int sweep_mask)
+static void gc_sweep_other(int sweep_full)
 {
-#ifdef GC_TIME
-    double t0 = jl_clock_now();
-#endif
-    skipped_pages = 0;
-    total_pages = 0;
-    freed_pages = 0;
-    lazy_freed_pages = 0;
-    page_done = 0;
-    int finished = 1;
+    sweep_malloced_arrays();
+    sweep_big(sweep_full);
+}
 
-    gcval_t ***pfl = (gcval_t ***) alloca(jl_n_threads * N_POOLS * sizeof(gcval_t**));
+static void gc_sweep_pool(int sweep_full)
+{
+    gc_time_pool_start();
+    lazy_freed_pages = 0;
+
+    jl_taggedvalue_t ***pfl = (jl_taggedvalue_t ***) alloca(jl_n_threads * JL_GC_N_POOLS * sizeof(jl_taggedvalue_t**));
 
     // update metadata of pages that were pointed to by freelist or newpages from a pool
     // i.e. pages being the current allocation target
-    FOR_EACH_HEAP () {
-        for (int i = 0; i < N_POOLS; i++) {
-            pool_t *p = &pools[i];
-            gcval_t *last = p->freelist;
+    for (int t_i = 0;t_i < jl_n_threads;t_i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[t_i];
+        for (int i = 0; i < JL_GC_N_POOLS; i++) {
+            jl_gc_pool_t *p = &ptls->heap.norm_pools[i];
+            jl_taggedvalue_t *last = p->freelist;
             if (last) {
-                gcpage_t *pg = page_metadata(last);
-                pg->allocd = 1;
+                jl_gc_pagemeta_t *pg = page_metadata(last);
+                pg->has_young = 1;
                 pg->nfree = p->nfree;
             }
             p->freelist =  NULL;
-            pfl[current_heap_index * N_POOLS + i] = &p->freelist;
+            pfl[t_i * JL_GC_N_POOLS + i] = &p->freelist;
 
             last = p->newpages;
             if (last) {
-                gcpage_t *pg = page_metadata(last);
-                pg->nfree = (GC_PAGE_SZ - ((char*)last - GC_PAGE_DATA(last))) / p->osize;
-                pg->allocd = 1;
+                jl_gc_pagemeta_t *pg = page_metadata(last);
+                pg->nfree = (GC_PAGE_SZ - ((char*)last - gc_page_data(last))) / p->osize;
+                pg->has_young = 1;
             }
             p->newpages = NULL;
         }
     }
 
     for (int i = 0; i < REGION_COUNT; i++) {
-        if (regions[i])
-            /*finished &= */sweep_pool_region(pfl, i, sweep_mask);
+        if (!regions[i].pages)
+            break;
+        sweep_pool_region(pfl, i, sweep_full);
     }
 
 
-    // null out terminal pointers of free lists and cache back pg->nfree in the pool_t
-    FOR_EACH_HEAP () {
-        for (int i = 0; i < N_POOLS; i++) {
-            pool_t *p = &pools[i];
-            *pfl[current_heap_index * N_POOLS + i] = NULL;
+    // null out terminal pointers of free lists and cache back pg->nfree in the jl_gc_pool_t
+    for (int t_i = 0;t_i < jl_n_threads;t_i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[t_i];
+        for (int i = 0; i < JL_GC_N_POOLS; i++) {
+            jl_gc_pool_t *p = &ptls->heap.norm_pools[i];
+            *pfl[t_i * JL_GC_N_POOLS + i] = NULL;
             if (p->freelist) {
                 p->nfree = page_metadata(p->freelist)->nfree;
             }
         }
     }
 
-#ifdef GC_TIME
-    double sweep_pool_sec = jl_clock_now() - t0;
-    double sweep_speed = ((((double)total_pages)*GC_PAGE_SZ)/(1024*1024*1024))/sweep_pool_sec;
-    jl_printf(JL_STDOUT, "GC sweep pools %s %.2f at %.1f GB/s (skipped %d%% of %d, done %d pgs, %d freed with %d lazily) mask %d\n", finished ? "end" : "inc", sweep_pool_sec*1000, sweep_speed, total_pages ? (skipped_pages*100)/total_pages : 0, total_pages, page_done, freed_pages, lazy_freed_pages,  sweep_mask);
-#endif
-    return finished;
+    gc_time_pool_end(sweep_full);
 }
 
 // mark phase
@@ -1570,52 +1062,50 @@ static void grow_mark_stack(void)
 
 static void reset_remset(void)
 {
-    FOR_EACH_HEAP () {
-        arraylist_t *tmp = remset;
-        remset = last_remset;
-        last_remset = tmp;
-        remset->len = 0;
-        remset_nptr = 0;
+    for (int t_i = 0;t_i < jl_n_threads;t_i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[t_i];
+        arraylist_t *tmp = ptls->heap.remset;
+        ptls->heap.remset = ptls->heap.last_remset;
+        ptls->heap.last_remset = tmp;
+        ptls->heap.remset->len = 0;
+        ptls->heap.remset_nptr = 0;
     }
 }
 
 JL_DLLEXPORT void jl_gc_queue_root(jl_value_t *ptr)
 {
-    FOR_CURRENT_HEAP () {
-        jl_taggedvalue_t *o = jl_astaggedvalue(ptr);
+    jl_taggedvalue_t *o = jl_astaggedvalue(ptr);
 #ifndef JULIA_ENABLE_THREADING
-        // Disable this assert since it can happen with multithreading (same
-        // with the ones in gc_queue_binding) when two threads are writing
-        // to the same object.
-        assert(gc_bits(o) != GC_QUEUED);
+    // Disable this assert since it can happen with multithreading (same
+    // with the ones in gc_queue_binding) when two threads are writing
+    // to the same object.
+    assert(o->bits.gc == GC_OLD_MARKED);
 #endif
-        // The modification of the `gc_bits` is not atomic but it
-        // should be safe here since GC is not allowed to run here and we only
-        // write GC_QUEUED to the GC bits outside GC. This could cause
-        // duplicated objects in the remset but that shouldn't be a problem.
-        gc_bits(o) = GC_QUEUED;
-        arraylist_push(remset, ptr);
-        remset_nptr++; // conservative
-    }
+    // The modification of the `gc_bits` is not atomic but it
+    // should be safe here since GC is not allowed to run here and we only
+    // write GC_OLD to the GC bits outside GC. This could cause
+    // duplicated objects in the remset but that shouldn't be a problem.
+    o->bits.gc = GC_MARKED;
+    arraylist_push(jl_thread_heap.remset, ptr);
+    jl_thread_heap.remset_nptr++; // conservative
 }
 
 void gc_queue_binding(jl_binding_t *bnd)
 {
-    FOR_CURRENT_HEAP () {
-        buff_t *buf = gc_val_buf(bnd);
+    jl_taggedvalue_t *buf = jl_astaggedvalue(bnd);
 #ifndef JULIA_ENABLE_THREADING
-        // Will fail for multithreading. See `jl_gc_queue_root`
-        assert(gc_bits(buf) != GC_QUEUED);
+    // Will fail for multithreading. See `jl_gc_queue_root`
+    assert(buf->bits.gc == GC_OLD_MARKED);
 #endif
-        gc_bits(buf) = GC_QUEUED;
-        arraylist_push(&rem_bindings, bnd);
-    }
+    buf->bits.gc = GC_MARKED;
+    arraylist_push(&jl_thread_heap.rem_bindings, bnd);
 }
 
 static int push_root(jl_value_t *v, int d, int);
 #ifdef JL_DEBUG_BUILD
 static void *volatile gc_findval; // for usage from gdb, for finding the gc-root for a value
 #endif
+// Returns whether the object is young
 static inline int gc_push_root(void *v, int d) // v isa jl_value_t*
 {
 #ifdef JL_DEBUG_BUILD
@@ -1625,25 +1115,18 @@ static inline int gc_push_root(void *v, int d) // v isa jl_value_t*
     assert(v != NULL);
     jl_taggedvalue_t *o = jl_astaggedvalue(v);
     verify_val(v);
-    int bits = gc_bits(o);
-    if (!gc_marked(o)) {
-        return push_root((jl_value_t*)v, d, bits);
-    }
-    return bits;
+    int bits = o->bits.gc;
+    if (!gc_marked(bits))
+        return !gc_old(push_root((jl_value_t*)v, d, bits));
+    return !gc_old(bits);
 }
 
 void jl_gc_setmark(jl_value_t *v) // TODO rename this as it is misleading now
 {
-    //    int64_t s = perm_scanned_bytes;
     jl_taggedvalue_t *o = jl_astaggedvalue(v);
-    if (!gc_marked(o)) {
-#ifdef MEMDEBUG
-        gc_setmark_big(o, GC_MARKED_NOESC);
-#else
-        gc_setmark_pool(o, GC_MARKED_NOESC);
-#endif
+    if (!gc_marked(o->bits.gc)) {
+        gc_setmark_pool(o, GC_MARKED);
     }
-    //    perm_scanned_bytes = s;
 }
 
 NOINLINE static int gc_mark_module(jl_module_t *m, int d)
@@ -1654,11 +1137,11 @@ NOINLINE static int gc_mark_module(jl_module_t *m, int d)
     for(i=1; i < m->bindings.size; i+=2) {
         if (table[i] != HT_NOTFOUND) {
             jl_binding_t *b = (jl_binding_t*)table[i];
-            gc_setmark_buf(b, gc_bits(jl_astaggedvalue(m)));
-#ifdef GC_VERIFY
-            void *vb = gc_val_buf(b);
+            gc_setmark_buf(b, jl_astaggedvalue(m)->bits.gc,
+                           sizeof(jl_binding_t));
+            void *vb = jl_astaggedvalue(b);
             verify_parent1("module", m, &vb, "binding_buff");
-#endif
+            (void)vb;
             if (b->value != NULL) {
                 verify_parent2("module", m, &b->value, "binding(%s)",
                                jl_symbol_name(b->name));
@@ -1692,8 +1175,9 @@ static void gc_mark_stack(jl_value_t *ta, jl_gcframe_t *s, intptr_t offset, int 
         if (s->nroots & 1) {
             for(size_t i=0; i < nr; i++) {
                 jl_value_t **ptr = (jl_value_t**)((char*)rts[i] + offset);
-                if (*ptr != NULL)
+                if (*ptr != NULL) {
                     gc_push_root(*ptr, d);
+                }
             }
         }
         else {
@@ -1712,12 +1196,17 @@ static void gc_mark_task_stack(jl_task_t *ta, int d)
 {
     int stkbuf = (ta->stkbuf != (void*)(intptr_t)-1 && ta->stkbuf != NULL);
     int16_t tid = ta->tid;
-    jl_tls_states_t *ptls = jl_all_task_states[tid].ptls;
+    jl_tls_states_t *ptls = jl_all_tls_states[tid];
     if (stkbuf) {
-#ifndef COPY_STACKS
-        if (ta != ptls->root_task) // stkbuf isn't owned by julia for the root task
+#ifdef COPY_STACKS
+        gc_setmark_buf(ta->stkbuf, jl_astaggedvalue(ta)->bits.gc, ta->bufsz);
+#else
+        // stkbuf isn't owned by julia for the root task
+        if (ta != ptls->root_task) {
+            gc_setmark_buf(ta->stkbuf, jl_astaggedvalue(ta)->bits.gc,
+                           ta->ssize);
+        }
 #endif
-        gc_setmark_buf(ta->stkbuf, gc_bits(jl_astaggedvalue(ta)));
     }
     if (ta == ptls->current_task) {
         gc_mark_stack((jl_value_t*)ta, ptls->pgcstack, 0, d);
@@ -1746,6 +1235,12 @@ NOINLINE static void gc_mark_task(jl_task_t *ta, int d)
     gc_mark_task_stack(ta, d);
 }
 
+void gc_mark_object_list(arraylist_t *list, size_t start)
+{
+    for (size_t i = start;i < list->len;i++) {
+        gc_push_root(list->items[i], 0);
+    }
+}
 
 // for chasing down unwanted references
 /*
@@ -1756,37 +1251,31 @@ JL_DLLEXPORT void jl_gc_lookfor(jl_value_t *v) { lookforme = v; }
 #define MAX_MARK_DEPTH 400
 // mark v and recurse on its children (or store them on the mark stack when recursion depth becomes too high)
 // it does so assuming the gc bits of v are "bits" and returns the new bits of v
-// if v becomes GC_MARKED (old) and some of its children are GC_MARKED_NOESC (young), v is added to the remset
+// if v becomes GC_OLD_MARKED and some of its children are GC_MARKED (young),
+// v is added to the remset
 static int push_root(jl_value_t *v, int d, int bits)
 {
     assert(v != NULL);
-    jl_value_t *vt = (jl_value_t*)gc_typeof(v);
+    jl_value_t *vt = jl_typeof(v);
     int refyoung = 0, nptr = 0;
 
     if (vt == (jl_value_t*)jl_weakref_type) {
-        bits = gc_setmark(v, sizeof(jl_weakref_t), GC_MARKED_NOESC);
+        bits = gc_setmark(v, sizeof(jl_weakref_t));
         goto ret;
     }
     if ((jl_is_datatype(vt) && ((jl_datatype_t*)vt)->pointerfree)) {
         int sz = jl_datatype_size(vt);
-        bits = gc_setmark(v, sz, GC_MARKED_NOESC);
+        bits = gc_setmark(v, sz);
         goto ret;
     }
-#define MARK(v, s) do {                         \
-            s;                                  \
-            if (d >= MAX_MARK_DEPTH)            \
-                goto queue_the_root;            \
-            if (should_timeout())               \
-                goto queue_the_root;            \
-    } while (0)
-
     d++;
 
     // some values have special representations
     if (vt == (jl_value_t*)jl_simplevector_type) {
         size_t l = jl_svec_len(v);
-        MARK(v, bits = gc_setmark(v, l * sizeof(void*) +
-                                  sizeof(jl_svec_t), GC_MARKED_NOESC));
+        bits = gc_setmark(v, l * sizeof(void*) + sizeof(jl_svec_t));
+        if (d >= MAX_MARK_DEPTH)
+            goto queue_the_root;
         jl_value_t **data = jl_svec_data(v);
         nptr += l;
         for(size_t i=0; i < l; i++) {
@@ -1800,43 +1289,32 @@ static int push_root(jl_value_t *v, int d, int bits)
     else if (((jl_datatype_t*)(vt))->name == jl_array_typename) {
         jl_array_t *a = (jl_array_t*)v;
         jl_taggedvalue_t *o = jl_astaggedvalue(v);
-        int todo = !(bits & GC_MARKED);
-        if (a->flags.pooled)
-#ifdef MEMDEBUG
-#define _gc_setmark_pool gc_setmark_big
-#else
-#define _gc_setmark_pool gc_setmark_pool
-#endif
-            MARK(a,
-                 bits = _gc_setmark_pool(o, GC_MARKED_NOESC);
-                 if (a->flags.how == 2 && todo) {
-                     objprofile_count(jl_malloc_tag, gc_bits(o) == GC_MARKED, array_nbytes(a));
-                     if (gc_bits(o) == GC_MARKED)
-                         perm_scanned_bytes += array_nbytes(a);
-                     else
-                         scanned_bytes += array_nbytes(a);
-                 });
-        else
-            MARK(a,
-                 bits = gc_setmark_big(o, GC_MARKED_NOESC);
-                 if (a->flags.how == 2 && todo) {
-                     objprofile_count(jl_malloc_tag, gc_bits(o) == GC_MARKED, array_nbytes(a));
-                     if (gc_bits(o) == GC_MARKED)
-                         perm_scanned_bytes += array_nbytes(a);
-                     else
-                         scanned_bytes += array_nbytes(a);
-                 });
+        int todo = !gc_marked(bits);
+        bits = (a->flags.pooled ? gc_setmark_pool(o, GC_MARKED) :
+                gc_setmark_big(o, GC_MARKED));
+        if (a->flags.how == 2 && todo) {
+            objprofile_count(jl_malloc_tag, o->bits.gc == GC_OLD_MARKED,
+                             array_nbytes(a));
+            if (o->bits.gc == GC_OLD_MARKED) {
+                perm_scanned_bytes += array_nbytes(a);
+            }
+            else {
+                scanned_bytes += array_nbytes(a);
+            }
+        }
+        if (d >= MAX_MARK_DEPTH)
+            goto queue_the_root;
         if (a->flags.how == 3) {
             jl_value_t *owner = jl_array_data_owner(a);
             refyoung |= gc_push_root(owner, d);
             goto ret;
         }
         else if (a->flags.how == 1) {
-#ifdef GC_VERIFY
-            void *val_buf = gc_val_buf((char*)a->data - a->offset*a->elsize);
+            void *val_buf = jl_astaggedvalue((char*)a->data - a->offset*a->elsize);
             verify_parent1("array", v, &val_buf, "buffer ('loc' addr is meaningless)");
-#endif
-            gc_setmark_buf((char*)a->data - a->offset*a->elsize, gc_bits(o));
+            (void)val_buf;
+            gc_setmark_buf((char*)a->data - a->offset*a->elsize, o->bits.gc,
+                           array_nbytes(a));
         }
         if (a->flags.ptrarray && a->data!=NULL) {
             size_t l = jl_array_len(a);
@@ -1848,7 +1326,7 @@ static int push_root(jl_value_t *v, int d, int bits)
             else {
                 nptr += l;
                 void *data = a->data;
-                for(size_t i=0; i < l; i++) {
+                for (size_t i=0; i < l; i++) {
                     jl_value_t *elt = ((jl_value_t**)data)[i];
                     if (elt != NULL) {
                         verify_parent2("array", v, &((jl_value_t**)data)[i], "elem(%d)", (int)i);
@@ -1862,22 +1340,26 @@ static int push_root(jl_value_t *v, int d, int bits)
     }
     else if (vt == (jl_value_t*)jl_module_type) {
         // should increase nptr here
-        MARK(v, bits = gc_setmark(v, sizeof(jl_module_t), GC_MARKED_NOESC));
+        bits = gc_setmark(v, sizeof(jl_module_t));
+        if (d >= MAX_MARK_DEPTH)
+            goto queue_the_root;
         refyoung |= gc_mark_module((jl_module_t*)v, d);
     }
     else if (vt == (jl_value_t*)jl_task_type) {
         // ditto nptr
-        MARK(v, bits = gc_setmark(v, sizeof(jl_task_t), GC_MARKED_NOESC));
+        bits = gc_setmark(v, sizeof(jl_task_t));
+        if (d >= MAX_MARK_DEPTH)
+            goto queue_the_root;
         gc_mark_task((jl_task_t*)v, d);
         // tasks should always be remarked since we do not trigger the write barrier
         // for stores to stack slots
-        refyoung = GC_MARKED_NOESC;
+        refyoung = 1;
     }
     else if (vt == (jl_value_t*)jl_symbol_type) {
         // symbols have their own allocator and are never freed
     }
     // this check should not be needed but it helps catching corruptions early
-    else if (gc_typeof(vt) == (jl_value_t*)jl_datatype_type) {
+    else if (jl_typeof(vt) == (jl_value_t*)jl_datatype_type) {
         jl_datatype_t *dt = (jl_datatype_t*)vt;
         size_t dtsz;
         if (dt == jl_datatype_type) {
@@ -1889,7 +1371,9 @@ static int push_root(jl_value_t *v, int d, int bits)
         else {
             dtsz = jl_datatype_size(dt);
         }
-        MARK(v, bits = gc_setmark(v, dtsz, GC_MARKED_NOESC));
+        bits = gc_setmark(v, dtsz);
+        if (d >= MAX_MARK_DEPTH)
+            goto queue_the_root;
 
         int nf = (int)jl_datatype_nfields(dt);
         // TODO check if there is a perf improvement for objects with a lot of fields
@@ -1920,66 +1404,48 @@ static int push_root(jl_value_t *v, int d, int bits)
         abort();
     }
 
- ret:
-#ifdef GC_VERIFY
-    if (verifying) return bits;
-#endif
-    if ((bits == GC_MARKED) && (refyoung == GC_MARKED_NOESC)) {
-        FOR_CURRENT_HEAP () {
-            remset_nptr += nptr;
-            // v is an old object referencing young objects
-            arraylist_push(remset, v);
-        }
+ret:
+    if (gc_verifying)
+        return bits;
+    if ((bits == GC_OLD_MARKED) && refyoung) {
+        jl_thread_heap.remset_nptr += nptr;
+        // v is an old object referencing young objects
+        arraylist_push(jl_thread_heap.remset, v);
     }
     return bits;
 
-#undef MARK
-
- queue_the_root:
-    if (mark_sp >= mark_stack_size) grow_mark_stack();
+queue_the_root:
+    if (mark_sp >= mark_stack_size)
+        grow_mark_stack();
     mark_stack[mark_sp++] = (jl_value_t*)v;
     return bits;
 }
 
-static void visit_mark_stack_inc(int mark_mode)
+void visit_mark_stack(void)
 {
-    while(mark_sp > 0 && !should_timeout()) {
+    while (mark_sp > 0 && !should_timeout()) {
         jl_value_t *v = mark_stack[--mark_sp];
-        assert(gc_bits(jl_astaggedvalue(v)) == GC_QUEUED ||
-               gc_bits(jl_astaggedvalue(v)) == GC_MARKED ||
-               gc_bits(jl_astaggedvalue(v)) == GC_MARKED_NOESC);
-        push_root(v, 0, gc_bits(jl_astaggedvalue(v)));
+        assert(jl_astaggedvalue(v)->bits.gc);
+        push_root(v, 0, jl_astaggedvalue(v)->bits.gc);
     }
-}
-
-static void visit_mark_stack(int mark_mode)
-{
-    visit_mark_stack_inc(mark_mode);
     assert(!mark_sp);
 }
 
 void jl_mark_box_caches(void);
 
-#if defined(GCTIME) || defined(GC_FINAL_STATS)
-double jl_clock_now(void);
-#endif
-
-extern jl_module_t *jl_old_base_module;
 extern jl_array_t *jl_module_init_order;
-
-static int inc_count = 0;
+extern jl_typemap_entry_t *call_cache[N_CALL_CACHE];
 
 // mark the initial root set
-static void pre_mark(void)
+void pre_mark(void)
 {
     // modules
     gc_push_root(jl_main_module, 0);
-    if (jl_old_base_module) gc_push_root(jl_old_base_module, 0);
     gc_push_root(jl_internal_main_module, 0);
 
     size_t i;
     for(i=0; i < jl_n_threads; i++) {
-        jl_tls_states_t *ptls = jl_all_task_states[i].ptls;
+        jl_tls_states_t *ptls = jl_all_tls_states[i];
         // current_module might not have a value when the thread is not
         // running.
         if (ptls->current_module)
@@ -1991,14 +1457,16 @@ static void pre_mark(void)
     }
 
     // invisible builtin values
-    if (jl_an_empty_cell) gc_push_root(jl_an_empty_cell, 0);
+    if (jl_an_empty_vec_any != NULL)
+        gc_push_root(jl_an_empty_vec_any, 0);
     if (jl_module_init_order != NULL)
         gc_push_root(jl_module_init_order, 0);
-
-    // objects currently being finalized
-    for(i=0; i < to_finalize.len; i++) {
-        gc_push_root(to_finalize.items[i], 0);
-    }
+    gc_push_root(jl_cfunction_list.unknown, 0);
+    gc_push_root(jl_anytuple_type_type, 0);
+    gc_push_root(jl_ANY_flag, 0);
+    for (i = 0; i < N_CALL_CACHE; i++)
+        if (call_cache[i])
+            gc_push_root(call_cache[i], 0);
 
     jl_mark_box_caches();
     //gc_push_root(jl_unprotect_stack_func, 0);
@@ -2014,16 +1482,16 @@ static void pre_mark(void)
 
 // find unmarked objects that need to be finalized from the finalizer list "list".
 // this must happen last in the mark phase.
-// if dryrun == 1, it does not schedule any actual finalization and only marks finalizers
-static void post_mark(arraylist_t *list, int dryrun)
+static void post_mark(arraylist_t *list)
 {
     for(size_t i=0; i < list->len; i+=2) {
         jl_value_t *v = (jl_value_t*)list->items[i];
         jl_value_t *fin = (jl_value_t*)list->items[i+1];
-        int isfreed = !gc_marked(jl_astaggedvalue(v));
-        gc_push_root(fin, 0);
-        int isold = list == &finalizer_list && gc_bits(jl_astaggedvalue(v)) == GC_MARKED && gc_bits(jl_astaggedvalue(fin)) == GC_MARKED;
-        if (!dryrun && (isfreed || isold)) {
+        int isfreed = !gc_marked(jl_astaggedvalue(v)->bits.gc);
+        int isold = (list != &finalizer_list_marked &&
+                     jl_astaggedvalue(v)->bits.gc == GC_OLD_MARKED &&
+                     jl_astaggedvalue(fin)->bits.gc == GC_OLD_MARKED);
+        if (isfreed || isold) {
             // remove from this list
             if (i < list->len - 2) {
                 list->items[i] = list->items[list->len-2];
@@ -2034,21 +1502,21 @@ static void post_mark(arraylist_t *list, int dryrun)
         }
         if (isfreed) {
             // schedule finalizer or execute right away if it is not julia code
-            if (gc_typeof(fin) == (jl_value_t*)jl_voidpointer_type) {
+            if (jl_typeof(fin) == (jl_value_t*)jl_voidpointer_type) {
                 void *p = jl_unbox_voidpointer(fin);
-                if (!dryrun && p)
+                if (p)
                     ((void (*)(void*))p)(jl_data_ptr(v));
                 continue;
             }
-            gc_push_root(v, 0);
-            if (!dryrun) schedule_finalization(v, fin);
+            schedule_finalization(v, fin);
         }
-        if (!dryrun && isold) {
+        if (isold) {
+            // The caller relies on the new objects to be pushed to the end of
+            // the list!!
             arraylist_push(&finalizer_list_marked, v);
             arraylist_push(&finalizer_list_marked, fin);
         }
     }
-    visit_mark_stack(GC_MARKED_NOESC);
 }
 
 // collector entry point and control
@@ -2076,9 +1544,19 @@ JL_DLLEXPORT int jl_gc_is_enabled(void)
     return !jl_get_ptls_states()->disable_gc;
 }
 
-JL_DLLEXPORT int64_t jl_gc_total_bytes(void) { return total_allocd_bytes + allocd_bytes + collect_interval; }
-JL_DLLEXPORT uint64_t jl_gc_total_hrtime(void) { return total_gc_time; }
-JL_DLLEXPORT GC_Num jl_gc_num(void) { return gc_num; }
+JL_DLLEXPORT int64_t jl_gc_total_bytes(void)
+{
+    // Sync this logic with `base/util.jl:GC_Diff`
+    return gc_num.total_allocd + gc_num.allocd + gc_num.interval;
+}
+JL_DLLEXPORT uint64_t jl_gc_total_hrtime(void)
+{
+    return gc_num.total_time;
+}
+JL_DLLEXPORT jl_gc_num_t jl_gc_num(void)
+{
+    return gc_num;
+}
 
 JL_DLLEXPORT int64_t jl_gc_diff_total_bytes(void)
 {
@@ -2089,275 +1567,217 @@ JL_DLLEXPORT int64_t jl_gc_diff_total_bytes(void)
 }
 void jl_gc_sync_total_bytes(void) {last_gc_total_bytes = jl_gc_total_bytes();}
 
-#if defined(MEMPROFILE)
-static void all_pool_stats(void);
-static void big_obj_stats(void);
-#endif
-
-#if defined(GC_TIME)
-static int saved_mark_sp = 0;
-#endif
-static int sweep_mask = GC_MARKED;
 #define MIN_SCAN_BYTES 1024*1024
 
 // Only one thread should be running in this function
 static void _jl_gc_collect(int full, char *stack_hi)
 {
     uint64_t t0 = jl_hrtime();
-    int recollect = 0;
-#if defined(GC_TIME)
-    int wb_activations = mark_sp - saved_mark_sp;
-#endif
     int64_t last_perm_scanned_bytes = perm_scanned_bytes;
-    if (!sweeping) {
-        inc_count++;
-        assert(mark_sp == 0);
+    assert(mark_sp == 0);
 
-        // 1. mark every object in the remset
-        reset_remset();
-        FOR_EACH_HEAP () {
-            // avoid counting remembered objects & bindings twice in perm_scanned_bytes
-            for(int i = 0; i < last_remset->len; i++) {
-                jl_value_t *item = (jl_value_t*)last_remset->items[i];
-                objprofile_count(jl_typeof(item), 2, 0);
-                gc_bits(jl_astaggedvalue(item)) = GC_MARKED;
-            }
-            for (int i = 0; i < rem_bindings.len; i++) {
-                void *ptr = rem_bindings.items[i];
-                gc_bits(gc_val_buf(ptr)) = GC_MARKED;
-            }
-
-            for (int i = 0; i < last_remset->len; i++) {
-                jl_value_t *item = (jl_value_t*)last_remset->items[i];
-                push_root(item, 0, GC_MARKED);
-            }
+    // 1. mark every object in the remset
+    reset_remset();
+    for (int t_i = 0;t_i < jl_n_threads;t_i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[t_i];
+        // avoid counting remembered objects & bindings twice in perm_scanned_bytes
+        for (int i = 0; i < ptls->heap.last_remset->len; i++) {
+            jl_value_t *item = (jl_value_t*)ptls->heap.last_remset->items[i];
+            objprofile_count(jl_typeof(item), 2, 0);
+            jl_astaggedvalue(item)->bits.gc = GC_OLD_MARKED;
+        }
+        for (int i = 0; i < ptls->heap.rem_bindings.len; i++) {
+            void *ptr = ptls->heap.rem_bindings.items[i];
+            jl_astaggedvalue(ptr)->bits.gc = GC_OLD_MARKED;
         }
 
-        // 2. mark every object in a remembered binding
-        FOR_EACH_HEAP () {
-            int n_bnd_refyoung = 0;
-            for (int i = 0; i < rem_bindings.len; i++) {
-                jl_binding_t *ptr = (jl_binding_t*)rem_bindings.items[i];
-                // A null pointer can happen here when the binding is cleaned up
-                // as an exception is thrown after it was already queued (#10221)
-                if (!ptr->value) continue;
-                if (gc_push_root(ptr->value, 0) == GC_MARKED_NOESC) {
-                    rem_bindings.items[n_bnd_refyoung] = ptr;
-                    n_bnd_refyoung++;
-                }
-            }
-            rem_bindings.len = n_bnd_refyoung;
+        for (int i = 0; i < ptls->heap.last_remset->len; i++) {
+            jl_value_t *item = (jl_value_t*)ptls->heap.last_remset->items[i];
+            push_root(item, 0, GC_OLD_MARKED);
         }
-
-        // 3. walk roots
-        pre_mark();
-        visit_mark_stack(GC_MARKED_NOESC);
-
-        allocd_bytes_since_sweep += allocd_bytes + (int64_t)collect_interval;
-
-#if defined(GC_TIME) || defined(GC_FINAL_STATS)
-        uint64_t mark_pause = jl_hrtime() - t0;
-#endif
-#ifdef GC_TIME
-        FOR_EACH_HEAP () {
-            jl_printf(JL_STDOUT, "GC mark pause %.2f ms | scanned %ld kB = %ld + %ld | stack %d -> %d (wb %d) | remset %d %d\n", NS2MS(mark_pause), (scanned_bytes + perm_scanned_bytes)/1024, scanned_bytes/1024, perm_scanned_bytes/1024, saved_mark_sp, mark_sp, wb_activations, last_remset->len, remset_nptr);
-        }
-        saved_mark_sp = mark_sp;
-#endif
-#ifdef GC_FINAL_STATS
-        total_mark_time += mark_pause;
-#endif
     }
-    #ifdef GC_TIME
-    int64_t bonus = -1, SAVE = -1, SAVE2 = -1, SAVE3 = -1, pct = -1;
-    #endif
-    int64_t estimate_freed = -1;
 
-#if defined(GC_TIME) || defined(GC_FINAL_STATS)
-    uint64_t post_time = 0;
-#endif
-    if (mark_sp == 0 || sweeping) {
-#if defined(GC_TIME) || defined(GC_FINAL_STATS)
-        uint64_t sweep_t0 = jl_hrtime();
-#endif
-        int64_t actual_allocd = allocd_bytes_since_sweep;
-        if (!sweeping) {
-            // marking is over
-#if defined(GC_TIME) || defined(GC_FINAL_STATS)
-            post_time = jl_hrtime();
-#endif
-            // 4. check for objects to finalize
-            post_mark(&finalizer_list, 0);
-            if (prev_sweep_mask == GC_MARKED) {
-                post_mark(&finalizer_list_marked, 0);
+    // 2. mark every object in a remembered binding
+    for (int t_i = 0;t_i < jl_n_threads;t_i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[t_i];
+        int n_bnd_refyoung = 0;
+        for (int i = 0; i < ptls->heap.rem_bindings.len; i++) {
+            jl_binding_t *ptr = (jl_binding_t*)ptls->heap.rem_bindings.items[i];
+            // A null pointer can happen here when the binding is cleaned up
+            // as an exception is thrown after it was already queued (#10221)
+            if (!ptr->value) continue;
+            if (gc_push_root(ptr->value, 0)) {
+                ptls->heap.rem_bindings.items[n_bnd_refyoung] = ptr;
+                n_bnd_refyoung++;
             }
-#if defined(GC_TIME) || defined(GC_FINAL_STATS)
-            post_time = jl_hrtime() - post_time;
-#endif
-            estimate_freed = live_bytes - scanned_bytes - perm_scanned_bytes + actual_allocd;
-
-            gc_verify();
-
-#if defined(MEMPROFILE)
-            all_pool_stats();
-            big_obj_stats();
-#endif
-            objprofile_printall();
-            objprofile_reset();
-            total_allocd_bytes += allocd_bytes_since_sweep;
-            if (prev_sweep_mask == GC_MARKED_NOESC)
-                promoted_bytes += perm_scanned_bytes - last_perm_scanned_bytes;
-            // 5. next collection decision
-            int not_freed_enough = estimate_freed < (7*(actual_allocd/10));
-            int nptr = 0;
-            FOR_EACH_HEAP ()
-                nptr += remset_nptr;
-            int large_frontier = nptr*sizeof(void*) >= default_collect_interval; // many pointers in the intergen frontier => "quick" mark is not quick
-            if ((full || large_frontier || ((not_freed_enough || promoted_bytes >= collect_interval) && (promoted_bytes >= default_collect_interval || prev_sweep_mask == GC_MARKED))) && n_pause > 1) {
-                if (prev_sweep_mask != GC_MARKED || full) {
-                    if (full) recollect = 1; // TODO enable this?
-                }
-                if (large_frontier)
-                    collect_interval = last_long_collect_interval;
-                if (not_freed_enough || large_frontier) {
-                    if (collect_interval < default_collect_interval)
-                        collect_interval = default_collect_interval;
-                    else if (collect_interval <= 2*(max_collect_interval/5)) {
-                        collect_interval = 5*(collect_interval/2);
-                    }
-                }
-                last_long_collect_interval = collect_interval;
-                sweep_mask = GC_MARKED;
-                promoted_bytes = 0;
-            }
-            else {
-                collect_interval = default_collect_interval/2;
-#ifdef GC_DEBUG_ENV
-                sweep_mask = jl_gc_debug_env.sweep_mask;
-#else
-                sweep_mask = GC_MARKED_NOESC;
-#endif
-            }
-            if (sweep_mask == GC_MARKED)
-                perm_scanned_bytes = 0;
-            scanned_bytes = 0;
-            // 5. start sweeping
-            sweep_weak_refs();
-            gc_sweep_once(sweep_mask);
-            sweeping = 1;
-            gc_scrub(stack_hi);
         }
-        if (gc_sweep_inc(sweep_mask)) {
-            // sweeping is over
-            // 6. if it is a quick sweep, put back the remembered objects in queued state
-            // so that we don't trigger the barrier again on them.
-            FOR_EACH_HEAP () {
-                if (sweep_mask == GC_MARKED_NOESC) {
-                    for (int i = 0; i < remset->len; i++) {
-                        gc_bits(jl_astaggedvalue(remset->items[i])) = GC_QUEUED;
-                    }
-                    for (int i = 0; i < rem_bindings.len; i++) {
-                        void *ptr = rem_bindings.items[i];
-                        gc_bits(gc_val_buf(ptr)) = GC_QUEUED;
-                    }
-                }
-                else {
-                    remset->len = 0;
-                    rem_bindings.len = 0;
-                    n_full_sweep++;
-                }
+        ptls->heap.rem_bindings.len = n_bnd_refyoung;
+    }
+
+    // 3. walk roots
+    pre_mark();
+    visit_mark_stack();
+    gc_num.since_sweep += gc_num.allocd + (int64_t)gc_num.interval;
+    gc_settime_premark_end();
+    gc_time_mark_pause(t0, scanned_bytes, perm_scanned_bytes);
+    int64_t actual_allocd = gc_num.since_sweep;
+    // marking is over
+    // 4. check for objects to finalize
+    // Record the length of the marked list since we need to
+    // mark the object moved to the marked list from the
+    // `finalizer_list` by `post_mark`
+    size_t orig_marked_len = finalizer_list_marked.len;
+    post_mark(&finalizer_list);
+    if (prev_sweep_full) {
+        post_mark(&finalizer_list_marked);
+        orig_marked_len = 0;
+    }
+    gc_mark_object_list(&finalizer_list, 0);
+    gc_mark_object_list(&finalizer_list_marked, orig_marked_len);
+    // "Flush" the mark stack before flipping the reset_age bit
+    // so that the objects are not incorrectly resetted.
+    visit_mark_stack();
+    mark_reset_age = 1;
+    // Reset the age and old bit for any unmarked objects referenced by the
+    // `to_finalize` list. These objects are only reachable from this list
+    // and should not be referenced by any old objects so this won't break
+    // the GC invariant.
+    gc_mark_object_list(&to_finalize, 0);
+    visit_mark_stack();
+    mark_reset_age = 0;
+    gc_settime_postmark_end();
+
+    int64_t live_sz_ub = live_bytes + actual_allocd;
+    int64_t live_sz_est = scanned_bytes + perm_scanned_bytes;
+    int64_t estimate_freed = live_sz_ub - live_sz_est;
+
+    gc_verify();
+
+    gc_stats_all_pool();
+    gc_stats_big_obj();
+    objprofile_printall();
+    objprofile_reset();
+    gc_num.total_allocd += gc_num.since_sweep;
+    if (!prev_sweep_full)
+        promoted_bytes += perm_scanned_bytes - last_perm_scanned_bytes;
+    // 5. next collection decision
+    int not_freed_enough = estimate_freed < (7*(actual_allocd/10));
+    int nptr = 0;
+    for (int i = 0;i < jl_n_threads;i++)
+        nptr += jl_all_tls_states[i]->heap.remset_nptr;
+    int large_frontier = nptr*sizeof(void*) >= default_collect_interval; // many pointers in the intergen frontier => "quick" mark is not quick
+    int sweep_full;
+    int recollect = 0;
+    if ((full || large_frontier ||
+         ((not_freed_enough || promoted_bytes >= gc_num.interval) &&
+          (promoted_bytes >= default_collect_interval || prev_sweep_full)) ||
+         gc_check_heap_size(live_sz_ub, live_sz_est)) &&
+        gc_num.pause > 1) {
+        gc_update_heap_size(live_sz_ub, live_sz_est);
+        recollect = full;
+        if (large_frontier)
+            gc_num.interval = last_long_collect_interval;
+        if (not_freed_enough || large_frontier) {
+            if (gc_num.interval < default_collect_interval) {
+                gc_num.interval = default_collect_interval;
             }
-
-            sweeping = 0;
-#ifdef GC_TIME
-            SAVE2 = freed_bytes;
-            SAVE3 = allocd_bytes_since_sweep;
-            pct = actual_allocd ? (freed_bytes*100)/actual_allocd : -1;
-#endif
-            prev_sweep_mask = sweep_mask;
-
-
-            allocd_bytes = -(int64_t)collect_interval;
-            inc_count = 0;
-            live_bytes += -freed_bytes + allocd_bytes_since_sweep;
-            allocd_bytes_since_sweep = 0;
-            jl_gc_total_freed_bytes += freed_bytes;
-            freed_bytes = 0;
+            else if (gc_num.interval <= 2*(max_collect_interval/5)) {
+                gc_num.interval = 5 * (gc_num.interval / 2);
+            }
         }
-#if defined(GC_FINAL_STATS) || defined(GC_TIME)
-        uint64_t sweep_pause = jl_hrtime() - sweep_t0;
-#endif
-#ifdef GC_FINAL_STATS
-        total_sweep_time += sweep_pause - post_time;
-        total_fin_time += + post_time;
-#endif
-#ifdef GC_TIME
-        jl_printf(JL_STDOUT, "GC sweep pause %.2f ms live %ld kB (freed %d kB EST %d kB [error %d] = %d%% of allocd %d kB b/r %ld/%ld) (%.2f ms in post_mark) (marked in %d inc) mask %d | next in %d kB\n", NS2MS(sweep_pause), live_bytes/1024, SAVE2/1024, estimate_freed/1024, (SAVE2 - estimate_freed), pct, SAVE3/1024, bonus/1024, SAVE/1024, NS2MS(post_time), inc_count, sweep_mask, -allocd_bytes/1024);
-#endif
+        last_long_collect_interval = gc_num.interval;
+        sweep_full = 1;
+        promoted_bytes = 0;
     }
-    n_pause++;
-    uint64_t pause = jl_hrtime() - t0;
-    total_gc_time += pause;
-#ifdef GC_FINAL_STATS
-    max_pause = max_pause < pause ? pause : max_pause;
-#endif
+    else {
+        gc_num.interval = default_collect_interval / 2;
+        sweep_full = gc_sweep_always_full;
+    }
+    if (sweep_full)
+        perm_scanned_bytes = 0;
+    scanned_bytes = 0;
+    // 5. start sweeping
+    sweep_weak_refs();
+    gc_sweep_other(sweep_full);
+    gc_scrub(stack_hi);
+    gc_sweep_pool(sweep_full);
+    // sweeping is over
+    // 6. if it is a quick sweep, put back the remembered objects in queued state
+    // so that we don't trigger the barrier again on them.
+    for (int t_i = 0;t_i < jl_n_threads;t_i++) {
+        jl_tls_states_t *ptls = jl_all_tls_states[t_i];
+        if (!sweep_full) {
+            for (int i = 0; i < ptls->heap.remset->len; i++) {
+                jl_astaggedvalue(ptls->heap.remset->items[i])->bits.gc = GC_MARKED;
+            }
+            for (int i = 0; i < ptls->heap.rem_bindings.len; i++) {
+                void *ptr = ptls->heap.rem_bindings.items[i];
+                jl_astaggedvalue(ptr)->bits.gc = GC_MARKED;
+            }
+        }
+        else {
+            ptls->heap.remset->len = 0;
+            ptls->heap.rem_bindings.len = 0;
+        }
+    }
 
-#ifdef GC_TIME
-    if (estimate_freed != SAVE2) {
-        // this should not happen but it does
-        // mostly because of gc_counted_* allocations
-    }
-#endif
+    uint64_t gc_end_t = jl_hrtime();
+    uint64_t pause = gc_end_t - t0;
+    gc_final_pause_end(t0, gc_end_t);
+    gc_time_sweep_pause(gc_end_t, actual_allocd, live_bytes,
+                        estimate_freed, sweep_full);
+    gc_num.full_sweep += sweep_full;
+    prev_sweep_full = sweep_full;
+    gc_num.allocd = -(int64_t)gc_num.interval;
+    live_bytes += -gc_num.freed + gc_num.since_sweep;
+    gc_num.pause += !recollect;
+    gc_num.total_time += pause;
+    gc_num.since_sweep = 0;
+    gc_num.freed = 0;
+
     if (recollect) {
-        n_pause--;
         _jl_gc_collect(0, stack_hi);
     }
 }
 
 JL_DLLEXPORT void jl_gc_collect(int full)
 {
+    jl_tls_states_t *ptls = jl_get_ptls_states();
     if (jl_gc_disable_counter)
         return;
     char *stack_hi = (char*)gc_get_stack_ptr();
     gc_debug_print();
-    JL_SIGATOMIC_BEGIN();
 
     int8_t old_state = jl_gc_state();
-    jl_get_ptls_states()->gc_state = JL_GC_STATE_WAITING;
-    // In case multiple threads enter the GC at the same time, only allow
-    // one of them to actually run the collection. We can't just let the
-    // master thread do the GC since it might be running unmanaged code
-    // and can take arbitrarily long time before hitting a safe point.
-    if (jl_atomic_compare_exchange(&jl_gc_running, 0, 1) != 0) {
-#ifdef JULIA_ENABLE_THREADING
-        JL_SIGATOMIC_END();
-        jl_wait_for_gc();
+    ptls->gc_state = JL_GC_STATE_WAITING;
+    // `jl_safepoint_start_gc()` makes sure only one thread can
+    // run the GC.
+    if (!jl_safepoint_start_gc()) {
+        // Multithread only. See assertion in `safepoint.c`
         jl_gc_state_set(old_state, JL_GC_STATE_WAITING);
-#else
-        // For single thread, GC should not call itself (in finalizers) before
-        // setting jl_gc_running to false so this should never happen.
-        assert(0 && "GC synchronization failure");
-#endif
         return;
     }
-    jl_gc_signal_begin();
+    // no-op for non-threading
+    jl_gc_wait_for_the_world();
 
-    if (!jl_gc_disable_counter)
+    if (!jl_gc_disable_counter) {
+        JL_LOCK_NOGC(&finalizers_lock);
         _jl_gc_collect(full, stack_hi);
+        JL_UNLOCK_NOGC(&finalizers_lock);
+    }
 
-    // Need to reset the page protection before resetting the flag since
-    // the thread will trigger a segfault immediately after returning from
-    // the signal handler.
-    jl_gc_signal_end();
-    jl_gc_running = 0;
-    JL_SIGATOMIC_END();
+    // no-op for non-threading
+    jl_safepoint_end_gc();
     jl_gc_state_set(old_state, JL_GC_STATE_WAITING);
 
-    if (!jl_gc_finalizers_inhibited) {
-        int8_t was_in_finalizer = jl_in_finalizer;
-        jl_in_finalizer = 1;
+    // Only disable finalizers on current thread
+    // Doing this on all threads is racy (it's impossible to check
+    // or wait for finalizers on other threads without dead lock).
+    if (!ptls->finalizers_inhibited) {
+        int8_t was_in_finalizer = ptls->in_finalizer;
+        ptls->in_finalizer = 1;
         run_finalizers();
-        jl_in_finalizer = was_in_finalizer;
+        ptls->in_finalizer = was_in_finalizer;
     }
 }
 
@@ -2365,207 +1785,97 @@ JL_DLLEXPORT void jl_gc_collect(int full)
 
 void *allocb(size_t sz)
 {
-    buff_t *b = NULL;
-    size_t allocsz = sz + sizeof(buff_t);
+    jl_taggedvalue_t *b = NULL;
+    size_t allocsz = sz + sizeof(jl_taggedvalue_t);
     if (allocsz < sz)  // overflow in adding offs, size was "negative"
         jl_throw(jl_memory_exception);
-#ifdef MEMDEBUG
-    b = (buff_t*)alloc_big(allocsz);
-    b->header = jl_buff_tag;
-    b->pooled = 0;
-#else
-    if (allocsz > GC_MAX_SZCLASS + sizeof(buff_t)) {
-        b = (buff_t*)alloc_big(allocsz);
+    if (allocsz > GC_MAX_SZCLASS + sizeof(jl_taggedvalue_t)) {
+        b = alloc_big(allocsz);
         b->header = jl_buff_tag;
-        b->pooled = 0;
     }
     else {
-        FOR_CURRENT_HEAP ()
-            b = (buff_t*)pool_alloc(&pools[szclass(allocsz)]);
+        b = pool_alloc(&jl_thread_heap.norm_pools[szclass(allocsz)]);
         b->header = jl_buff_tag;
-        b->pooled = 1;
     }
-#endif
-    return &b->data[0];
+    return jl_valueof(b);
 }
-
-/* this function is horribly broken in that it is unable to fix the bigval_t pointer chain after the realloc
- * so it is basically just completely invalid in the bigval_t case
-void *reallocb(void *b, size_t sz)
-{
-    buff_t *buff = gc_val_buf(b);
-    if (buff->pooled) {
-        void* b2 = allocb(sz);
-        memcpy(b2, b, page_metadata(buff)->osize);
-        return b2;
-    }
-    else {
-        size_t allocsz = LLT_ALIGN(sz + sizeof(bigval_t), 16);
-        if (allocsz < sz)  // overflow in adding offs, size was "negative"
-            jl_throw(jl_memory_exception);
-        bigval_t *bv = bigval_header(buff);
-        bv = (bigval_t*)realloc_cache_align(bv, allocsz, bv->sz&~3);
-        if (bv == NULL)
-            jl_throw(jl_memory_exception);
-        return &bv->data[0];
-    }
-}
-*/
 
 JL_DLLEXPORT jl_value_t *jl_gc_allocobj(size_t sz)
 {
-    size_t allocsz = sz + sizeof_jl_taggedvalue_t;
+    size_t allocsz = sz + sizeof(jl_taggedvalue_t);
     if (allocsz < sz) // overflow in adding offs, size was "negative"
         jl_throw(jl_memory_exception);
-#ifdef MEMDEBUG
-    return jl_valueof(alloc_big(allocsz));
-#endif
-    if (allocsz <= GC_MAX_SZCLASS + sizeof(buff_t)) {
-        FOR_CURRENT_HEAP () {
-            return jl_valueof(pool_alloc(&pools[szclass(allocsz)]));
-        }
+    if (allocsz <= GC_MAX_SZCLASS + sizeof(jl_taggedvalue_t)) {
+        return jl_valueof(pool_alloc(&jl_thread_heap.norm_pools[szclass(allocsz)]));
     }
     return jl_valueof(alloc_big(allocsz));
 }
 
 JL_DLLEXPORT jl_value_t *jl_gc_alloc_0w(void)
 {
-    const int sz = sizeof_jl_taggedvalue_t;
-    void *tag = NULL;
-#ifdef MEMDEBUG
-    tag = alloc_big(sz);
-#else
-    FOR_CURRENT_HEAP ()
-        tag = _pool_alloc(&pools[szclass(sz)], sz);
-#endif
+    const int sz = sizeof(jl_taggedvalue_t);
+    void *tag = _pool_alloc(&jl_thread_heap.norm_pools[szclass(sz)], sz);
     return jl_valueof(tag);
 }
 
 JL_DLLEXPORT jl_value_t *jl_gc_alloc_1w(void)
 {
-    const int sz = LLT_ALIGN(sizeof_jl_taggedvalue_t + sizeof(void*), JL_SMALL_BYTE_ALIGNMENT);
-    void *tag = NULL;
-#ifdef MEMDEBUG
-    tag = alloc_big(sz);
-#else
-    FOR_CURRENT_HEAP ()
-        tag = _pool_alloc(&pools[szclass(sz)], sz);
-#endif
+    const int sz = LLT_ALIGN(sizeof(jl_taggedvalue_t) + sizeof(void*), JL_SMALL_BYTE_ALIGNMENT);
+    void *tag = _pool_alloc(&jl_thread_heap.norm_pools[szclass(sz)], sz);
     return jl_valueof(tag);
 }
 
 JL_DLLEXPORT jl_value_t *jl_gc_alloc_2w(void)
 {
-    const int sz = LLT_ALIGN(sizeof_jl_taggedvalue_t + sizeof(void*) * 2, JL_SMALL_BYTE_ALIGNMENT);
-    void *tag = NULL;
-#ifdef MEMDEBUG
-    tag = alloc_big(sz);
-#else
-    FOR_CURRENT_HEAP ()
-        tag = _pool_alloc(&pools[szclass(sz)], sz);
-#endif
+    const int sz = LLT_ALIGN(sizeof(jl_taggedvalue_t) + sizeof(void*) * 2, JL_SMALL_BYTE_ALIGNMENT);
+    void *tag = _pool_alloc(&jl_thread_heap.norm_pools[szclass(sz)], sz);
     return jl_valueof(tag);
 }
 
 JL_DLLEXPORT jl_value_t *jl_gc_alloc_3w(void)
 {
-    const int sz = LLT_ALIGN(sizeof_jl_taggedvalue_t + sizeof(void*) * 3, JL_SMALL_BYTE_ALIGNMENT);
-    void *tag = NULL;
-#ifdef MEMDEBUG
-    tag = alloc_big(sz);
-#else
-    FOR_CURRENT_HEAP ()
-        tag = _pool_alloc(&pools[szclass(sz)], sz);
-#endif
+    const int sz = LLT_ALIGN(sizeof(jl_taggedvalue_t) + sizeof(void*) * 3, JL_SMALL_BYTE_ALIGNMENT);
+    void *tag = _pool_alloc(&jl_thread_heap.norm_pools[szclass(sz)], sz);
     return jl_valueof(tag);
 }
 
-#ifdef GC_FINAL_STATS
-static double process_t0;
-#include <malloc.h>
-void jl_print_gc_stats(JL_STREAM *s)
-{
-    double gct = total_gc_time/1e9;
-    malloc_stats();
-    double ptime = jl_clock_now()-process_t0;
-    jl_printf(s, "exec time\t%.5f sec\n", ptime);
-    if (n_pause > 0) {
-        jl_printf(s, "gc time  \t%.5f sec (%2.1f%%) in %d (%d full) collections\n",
-                  NS_TO_S(total_gc_time), (NS_TO_S(total_gc_time)/ptime)*100, n_pause, n_full_sweep);
-        jl_printf(s, "gc pause \t%.2f ms avg\n\t\t%2.0f ms max\n",
-                  NS2MS(total_gc_time)/n_pause, NS2MS(max_pause));
-        jl_printf(s, "\t\t(%2d%% mark, %2d%% sweep, %2d%% finalizers)\n",
-                  (int)(total_mark_time * 100 / total_gc_time),
-                  (int)(total_sweep_time * 100 / total_gc_time),
-                  (int)(total_fin_time * 100 / total_gc_time));
-    }
-    int i = 0;
-    while (i < REGION_COUNT && regions[i]) i++;
-    jl_printf(s, "max allocated regions : %d\n", i);
-    struct mallinfo mi = mallinfo();
-    jl_printf(s, "malloc size\t%d MB\n", mi.uordblks/1024/1024);
-    jl_printf(s, "max page alloc\t%ld MB\n", max_pg_count*GC_PAGE_SZ/1024/1024);
-    jl_printf(s, "total freed\t%" PRIuPTR " b\n", jl_gc_total_freed_bytes);
-    jl_printf(s, "free rate\t%.1f MB/sec\n", (jl_gc_total_freed_bytes/gct)/1024/1024);
-}
-#endif
-
 // Per-thread initialization (when threading is fully implemented)
-jl_thread_heap_t *jl_mk_thread_heap(void)
+void jl_mk_thread_heap(jl_thread_heap_t *heap)
 {
-#ifdef JULIA_ENABLE_THREADING
-    // Cache-aligned malloc
-    jl_thread_heap =
-        (jl_thread_heap_t*)jl_malloc_aligned(sizeof(jl_thread_heap_t), JL_CACHE_BYTE_ALIGNMENT);
-#endif
-    FOR_CURRENT_HEAP () {
-        const int *szc = sizeclasses;
-        pool_t *p = pools;
-        for(int i=0; i < N_POOLS; i++) {
-            assert((szc[i] < 16 && szc[i] % sizeof(void*) == 0) ||
-                   (szc[i] % 16 == 0));
-            p[i].osize = szc[i];
-            p[i].freelist = NULL;
-            p[i].newpages = NULL;
-            p[i].end_offset = GC_POOL_END_OFS(szc[i]);
-        }
-        arraylist_new(&weak_refs, 0);
-        mallocarrays = NULL;
-        mafreelist = NULL;
-        big_objects = NULL;
-        arraylist_new(&rem_bindings, 0);
-        remset = &HEAP(_remset)[0];
-        last_remset = &HEAP(_remset)[1];
-        arraylist_new(remset, 0);
-        arraylist_new(last_remset, 0);
+    const int *szc = sizeclasses;
+    jl_gc_pool_t *p = heap->norm_pools;
+    for(int i=0; i < JL_GC_N_POOLS; i++) {
+        assert((szc[i] < 16 && szc[i] % sizeof(void*) == 0) ||
+               (szc[i] % 16 == 0));
+        p[i].osize = szc[i];
+        p[i].freelist = NULL;
+        p[i].newpages = NULL;
+        p[i].end_offset = GC_POOL_END_OFS(szc[i]);
     }
-    return jl_thread_heap;
+    arraylist_new(&heap->weak_refs, 0);
+    heap->mallocarrays = NULL;
+    heap->mafreelist = NULL;
+    heap->big_objects = NULL;
+    arraylist_new(&heap->rem_bindings, 0);
+    heap->remset = &heap->_remset[0];
+    heap->last_remset = &heap->_remset[1];
+    arraylist_new(heap->remset, 0);
+    arraylist_new(heap->last_remset, 0);
 }
 
 // System-wide initializations
 void jl_gc_init(void)
 {
+    jl_gc_init_page();
     gc_debug_init();
 
     arraylist_new(&finalizer_list, 0);
     arraylist_new(&finalizer_list_marked, 0);
     arraylist_new(&to_finalize, 0);
 
-    collect_interval = default_collect_interval;
+    gc_num.interval = default_collect_interval;
     last_long_collect_interval = default_collect_interval;
-    allocd_bytes = -default_collect_interval;
-
-#ifdef GC_VERIFY
-    for(int i = 0; i < 4; i++)
-        arraylist_new(&bits_save[i], 0);
-    arraylist_new(&lostval_parents, 0);
-    arraylist_new(&lostval_parents_done, 0);
-#endif
-
-    objprofile_init();
-#ifdef GC_FINAL_STATS
-    process_t0 = jl_clock_now();
-#endif
+    gc_num.allocd = -default_collect_interval;
 
 #ifdef _P64
     // on a big memory machine, set max_collect_interval to totalmem/ncores/2
@@ -2575,114 +1885,11 @@ void jl_gc_init(void)
 #endif
 }
 
-// GC summary stats
-
-#if defined(MEMPROFILE)
-// TODO repair this
-static size_t pool_stats(pool_t *p, size_t *pwaste, size_t *np, size_t *pnold)
-{
-    gcval_t *v;
-    gcpage_t *pg = p->pages;
-    size_t osize = p->osize;
-    size_t nused=0, nfree=0, npgs=0, nold = 0;
-
-    while (pg != NULL) {
-        npgs++;
-        v = (gcval_t*)(pg->data + GC_PAGE_OFFSET);
-        char *lim = (char*)v + GC_PAGE_SZ - GC_PAGE_OFFSET - osize;
-        int i = 0;
-        while ((char*)v <= lim) {
-            if (!gc_marked(v)) {
-                nfree++;
-            }
-            else {
-                nused++;
-                if (gc_bits(v) == GC_MARKED) {
-                    nold++;
-                }
-            }
-            v = (gcval_t*)((char*)v + osize);
-            i++;
-        }
-        gcpage_t *nextpg = NULL;
-        pg = nextpg;
-    }
-    *pwaste = npgs * GC_PAGE_SZ - (nused * p->osize);
-    *np = npgs;
-    *pnold = nold;
-    if (npgs != 0) {
-        jl_printf(JL_STDOUT,
-                  "%4d : %7d/%7d objects (%3d%% old), %5d pages, %5d kB, %5d kB waste\n",
-                  p->osize,
-                  nused,
-                  nused+nfree,
-                  nused ? (nold*100)/nused : 0,
-                  npgs,
-                  (nused*p->osize)/1024,
-                  *pwaste/1024);
-    }
-    return nused*p->osize;
-}
-
-static void all_pool_stats(void)
-{
-    int i;
-    size_t nb=0, w, tw=0, no=0,tp=0, nold=0,noldbytes=0, b, np, nol;
-    for(i=0; i < N_POOLS; i++) {
-        FOR_EACH_HEAP () {
-            b = pool_stats(&pools[i], &w, &np, &nol);
-            nb += b;
-            no += (b/pools[i].osize);
-            tw += w;
-            tp += np;
-            nold += nol;
-            noldbytes += nol*pools[i].osize;
-        }
-    }
-    jl_printf(JL_STDOUT,
-              "%d objects (%d%% old), %d kB (%d%% old) total allocated, %d total fragments (%d%% overhead), in %d pages\n",
-              no, (nold*100)/no, nb/1024, (noldbytes*100)/nb, tw, (tw*100)/nb, tp);
-}
-
-static void big_obj_stats(void)
-{
-    bigval_t *v = big_objects;
-    size_t nused=0, nbytes=0;
-    while (v != NULL) {
-        if (gc_marked(&v->_data)) {
-            nused++;
-            nbytes += v->sz&~3;
-        }
-        v = v->next;
-    }
-    v = big_objects_marked;
-    size_t nused_old=0, nbytes_old=0;
-    while (v != NULL) {
-        if (gc_marked(&v->_data)) {
-            nused_old++;
-            nbytes_old += v->sz&~3;
-        }
-        v = v->next;
-    }
-
-    mallocarray_t *ma = mallocarrays;
-    while (ma != NULL) {
-        if (gc_marked(jl_astaggedvalue(ma->a))) {
-            nused++;
-            nbytes += array_nbytes(ma->a);
-        }
-        ma = ma->next;
-    }
-
-    jl_printf(JL_STDOUT, "%d kB (%d%% old) in %d large objects (%d%% old)\n", (nbytes + nbytes_old)/1024, nbytes + nbytes_old ? (nbytes_old*100)/(nbytes + nbytes_old) : 0, nused + nused_old, nused+nused_old ? (nused_old*100)/(nused + nused_old) : 0);
-}
-#endif //MEMPROFILE
-
 JL_DLLEXPORT void *jl_gc_counted_malloc(size_t sz)
 {
     sz += JL_SMALL_BYTE_ALIGNMENT;
     maybe_collect();
-    allocd_bytes += sz;
+    gc_num.allocd += sz;
     gc_num.malloc++;
     void *b = malloc(sz);
     if (b == NULL)
@@ -2694,7 +1901,7 @@ JL_DLLEXPORT void *jl_gc_counted_calloc(size_t nm, size_t sz)
 {
     nm += JL_SMALL_BYTE_ALIGNMENT;
     maybe_collect();
-    allocd_bytes += nm*sz;
+    gc_num.allocd += nm*sz;
     gc_num.malloc++;
     void *b = calloc(nm, sz);
     if (b == NULL)
@@ -2705,7 +1912,7 @@ JL_DLLEXPORT void *jl_gc_counted_calloc(size_t nm, size_t sz)
 JL_DLLEXPORT void jl_gc_counted_free(void *p, size_t sz)
 {
     free(p);
-    freed_bytes += sz + JL_SMALL_BYTE_ALIGNMENT;
+    gc_num.freed += sz + JL_SMALL_BYTE_ALIGNMENT;
     gc_num.freecall++;
 }
 
@@ -2715,9 +1922,9 @@ JL_DLLEXPORT void *jl_gc_counted_realloc_with_old_size(void *p, size_t old, size
     sz += JL_SMALL_BYTE_ALIGNMENT;
     maybe_collect();
     if (sz < old)
-       freed_bytes += (old - sz);
+       gc_num.freed += (old - sz);
     else
-       allocd_bytes += (sz - old);
+       gc_num.allocd += (sz - old);
     gc_num.realloc++;
     void *b = realloc(p, sz);
     if (b == NULL)
@@ -2771,7 +1978,7 @@ JL_DLLEXPORT void *jl_gc_managed_malloc(size_t sz)
     size_t allocsz = LLT_ALIGN(sz, JL_CACHE_BYTE_ALIGNMENT);
     if (allocsz < sz)  // overflow in adding offs, size was "negative"
         jl_throw(jl_memory_exception);
-    allocd_bytes += allocsz;
+    gc_num.allocd += allocsz;
     gc_num.malloc++;
     void *b = malloc_cache_align(allocsz);
     if (b == NULL)
@@ -2788,14 +1995,14 @@ JL_DLLEXPORT void *jl_gc_managed_realloc(void *d, size_t sz, size_t oldsz,
     if (allocsz < sz)  // overflow in adding offs, size was "negative"
         jl_throw(jl_memory_exception);
 
-    if (gc_bits(jl_astaggedvalue(owner)) == GC_MARKED) {
+    if (jl_astaggedvalue(owner)->bits.gc == GC_OLD_MARKED) {
         perm_scanned_bytes += allocsz - oldsz;
         live_bytes += allocsz - oldsz;
     }
     else if (allocsz < oldsz)
-        freed_bytes += (oldsz - allocsz);
+        gc_num.freed += (oldsz - allocsz);
     else
-        allocd_bytes += (allocsz - oldsz);
+        gc_num.allocd += (allocsz - oldsz);
     gc_num.realloc++;
 
     void *b;

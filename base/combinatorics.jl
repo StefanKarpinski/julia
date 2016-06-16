@@ -39,10 +39,10 @@ factorial(n::UInt128) = factorial_lookup(n, _fact_table128, 34)
 factorial(n::Union{Int64,UInt64}) = factorial_lookup(n, _fact_table64, 20)
 
 if Int === Int32
-factorial(n::Union{Int8,UInt8,Int16,UInt16}) = factorial(Int32(n))
-factorial(n::Union{Int32,UInt32}) = factorial_lookup(n, _fact_table64, 12)
+    factorial(n::Union{Int8,UInt8,Int16,UInt16}) = factorial(Int32(n))
+    factorial(n::Union{Int32,UInt32}) = factorial_lookup(n, _fact_table64, 12)
 else
-factorial(n::Union{Int8,UInt8,Int16,UInt16,Int32,UInt32}) = factorial(Int64(n))
+    factorial(n::Union{Int8,UInt8,Int16,UInt16,Int32,UInt32}) = factorial(Int64(n))
 end
 
 function gamma(n::Union{Int8,UInt8,Int16,UInt16,Int32,UInt32,Int64,UInt64})
@@ -100,7 +100,7 @@ to verify that `p` is a permutation.
 To return a new permutation, use `v[p]`. Note that this is generally faster than
 `permute!(v,p)` for large vectors.
 """
-permute!(a, p::AbstractVector) = permute!!(a, copy!(similar(p), p))
+permute!(a, p::AbstractVector) = permute!!(a, copymutable(p))
 
 function ipermute!!{T<:Integer}(a, p::AbstractVector{T})
     count = 0
@@ -130,7 +130,7 @@ end
 
 Like `permute!`, but the inverse of the given permutation is applied.
 """
-ipermute!(a, p::AbstractVector) = ipermute!!(a, copy!(similar(p), p))
+ipermute!(a, p::AbstractVector) = ipermute!!(a, copymutable(p))
 
 """
     invperm(v)
@@ -147,6 +147,7 @@ function invperm(a::AbstractVector)
     end
     b
 end
+invperm(a::Tuple) = (invperm([a...])...,)
 
 #XXX This function should be moved to Combinatorics.jl but is currently used by Base.DSP.
 """
@@ -154,12 +155,6 @@ end
 
 Next integer not less than `n` that can be written as ``\\prod k_i^{p_i}`` for integers
 ``p_1``, ``p_2``, etc.
-
-For a list of integers i1, i2, i3, find the smallest
-
-    i1^n1 * i2^n2 * i3^n3 >= x
-
-for integer n1, n2, n3
 """
 function nextprod(a::Vector{Int}, x)
     if x > typemax(Int)
@@ -197,18 +192,4 @@ function nextprod(a::Vector{Int}, x)
     end
     # might overflow, but want predictable return type
     return mx[end] < best ? Int(mx[end]) : Int(best)
-end
-
-
-
-#Functions that have been moved out of base in Julia 0.5
-#Note: only the two-argument form of factorial has been moved
-for deprecatedfunc in [:combinations, :factorial, :prevprod, :levicivita,
-    :nthperm!, :nthperm, :parity, :partitions, :permutations]
-
-    @eval begin
-        $deprecatedfunc(args...) = error(string($deprecatedfunc, args,
-            " has been moved to the package Combinatorics.jl.\n",
-            "Run Pkg.add(\"Combinatorics\") to install Combinatorics on Julia v0.5-"))
-    end
 end

@@ -42,7 +42,14 @@ end
 
 @test powermod(2, 3, 5) == 3
 @test powermod(2, 3, -5) == -2
-@test_throws DomainError powermod(2, -3, 5)
+
+@test powermod(2, 0, 5) == 1
+@test powermod(2, 0, -5) == -4
+
+@test powermod(2, -1, 5) == 3
+@test powermod(2, -2, 5) == 4
+@test powermod(2, -1, -5) == -2
+@test powermod(2, -2, -5) == -1
 
 @test nextpow2(3) == 4
 @test nextpow(2, 3) == 4
@@ -71,6 +78,10 @@ end
 @test ndigits(unsigned(17), -10) == 3
 
 @test ndigits(146, -3) == 5
+
+let n = rand(Int)
+    @test ndigits(n) == ndigits(big(n)) == ndigits(n, 10)
+end
 
 @test bin(3) == "11"
 @test bin(3, 2) == "11"
@@ -128,3 +139,6 @@ let ptr = Ptr{Void}(typemax(UInt))
         @test typeof(Ptr{Float64}(T(ptr))) == Ptr{Float64}
     end
 end
+
+# issue #15911
+@inferred string(1)

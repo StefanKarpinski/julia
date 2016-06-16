@@ -4,28 +4,40 @@ baremodule Base
 
 using Core.TopModule, Core.Intrinsics
 ccall(:jl_set_istopmod, Void, (Bool,), true)
-
 include = Core.include
+include("coreio.jl")
 
 eval(x) = Core.eval(Base,x)
 eval(m,x) = Core.eval(m,x)
+
+# init core docsystem
+import Core: @doc, @__doc__, @doc_str
+Core.atdoc!(Core.Inference.CoreDocs.docm)
 
 include("exports.jl")
 
 if false
     # simple print definitions for debugging. enable these if something
     # goes wrong during bootstrap before printing code is available.
-    show(x::ANY) = ccall(:jl_static_show, Void, (Ptr{Void}, Any),
-                         pointerref(cglobal(:jl_uv_stdout,Ptr{Void}),1), x)
-    print(x::ANY) = show(x)
-    println(x::ANY) = ccall(:jl_, Void, (Any,), x)
-    print(a::ANY...) = for x=a; print(x); end
+    # otherwise, they just just eventually get (noisily) overwritten later
+    global show, print, println
+    show(io::IO, x::ANY) = Core.show(io, x)
+    print(io::IO, a::ANY...) = Core.print(io, a...)
+    println(io::IO, x::ANY...) = Core.println(io, x...)
+    if false # show that the IO system now (relatively) operational
+        print("HELLO")
+        println(" WORLD")
+        show("αβγ :)"); println()
+        println(STDERR, "TEST")
+        println(STDERR, STDERR)
+        println(STDERR, 'a')
+        println(STDERR, 'α')
+        show(STDOUT, 'α')
+    end
 end
-
 
 ## Load essential files and libraries
 include("essentials.jl")
-include("docs/bootstrap.jl")
 include("base.jl")
 include("generator.jl")
 include("reflection.jl")
@@ -46,9 +58,11 @@ include("operators.jl")
 include("pointer.jl")
 include("refpointer.jl")
 (::Type{T}){T}(arg) = convert(T, arg)::T
-include("functors.jl")
 include("checked.jl")
 importall .Checked
+
+# vararg Symbol constructor
+Symbol(x...) = Symbol(string(x...))
 
 # array structures
 include("abstractarray.jl")
@@ -94,23 +108,26 @@ importall .SimdLoop
 include("reduce.jl")
 
 ## core structures
+include("reshapedarray.jl")
 include("bitarray.jl")
 include("intset.jl")
 include("dict.jl")
 include("set.jl")
 include("iterator.jl")
 
-# StridedArrays
-typealias StridedArray{T,N,A<:DenseArray,I<:Tuple{Vararg{Union{RangeIndex, NoSlice, AbstractCartesianIndex}}}} Union{DenseArray{T,N}, SubArray{T,N,A,I}}
-typealias StridedVector{T,A<:DenseArray,I<:Tuple{Vararg{Union{RangeIndex, NoSlice, AbstractCartesianIndex}}}}  Union{DenseArray{T,1}, SubArray{T,1,A,I}}
-typealias StridedMatrix{T,A<:DenseArray,I<:Tuple{Vararg{Union{RangeIndex, NoSlice, AbstractCartesianIndex}}}}  Union{DenseArray{T,2}, SubArray{T,2,A,I}}
+# Definition of StridedArray
+typealias StridedReshapedArray{T,N,A<:DenseArray} ReshapedArray{T,N,A}
+typealias StridedArray{T,N,A<:Union{DenseArray,StridedReshapedArray},I<:Tuple{Vararg{Union{RangeIndex, NoSlice, AbstractCartesianIndex}}}} Union{DenseArray{T,N}, SubArray{T,N,A,I}, StridedReshapedArray{T,N}}
+typealias StridedVector{T,A<:Union{DenseArray,StridedReshapedArray},I<:Tuple{Vararg{Union{RangeIndex, NoSlice, AbstractCartesianIndex}}}}  Union{DenseArray{T,1}, SubArray{T,1,A,I}, StridedReshapedArray{T,1}}
+typealias StridedMatrix{T,A<:Union{DenseArray,StridedReshapedArray},I<:Tuple{Vararg{Union{RangeIndex, NoSlice, AbstractCartesianIndex}}}}  Union{DenseArray{T,2}, SubArray{T,2,A,I}, StridedReshapedArray{T,2}}
 typealias StridedVecOrMat{T} Union{StridedVector{T}, StridedMatrix{T}}
 
 # For OS specific stuff
-include(UTF8String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "build_h.jl".data))) # include($BUILDROOT/base/build_h.jl)
-include(UTF8String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "version_git.jl".data))) # include($BUILDROOT/base/version_git.jl)
+include(String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "build_h.jl".data))) # include($BUILDROOT/base/build_h.jl)
+include(String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "version_git.jl".data))) # include($BUILDROOT/base/version_git.jl)
 include("osutils.jl")
 include("c.jl")
+include("sysinfo.jl")
 
 # Core I/O
 include("io.jl")
@@ -119,9 +136,8 @@ include("iobuffer.jl")
 
 # strings & printing
 include("char.jl")
-include("ascii.jl")
-include("string.jl")
-include("unicode.jl")
+include("strings/strings.jl")
+include("unicode/unicode.jl")
 include("parse.jl")
 include("shell.jl")
 include("regex.jl")
@@ -154,7 +170,7 @@ importall .Filesystem
 include("process.jl")
 include("multimedia.jl")
 importall .Multimedia
-include("grisu.jl")
+include("grisu/grisu.jl")
 import .Grisu.print_shortest
 include("methodshow.jl")
 
@@ -170,8 +186,8 @@ include("float16.jl")
 include("cartesian.jl")
 using .Cartesian
 include("multidimensional.jl")
-
-include("primes.jl")
+include("permuteddimsarray.jl")
+using .PermutedDimsArrays
 
 let SOURCE_PATH = ""
     global include = function(path)
@@ -232,10 +248,12 @@ importall .Enums
 include("serialize.jl")
 importall .Serializer
 include("channels.jl")
+include("clusterserialize.jl")
 include("multi.jl")
 include("workerpool.jl")
+include("pmap.jl")
 include("managers.jl")
-include("mapiterator.jl")
+include("asyncmap.jl")
 
 # code loading
 include("loading.jl")
@@ -267,7 +285,7 @@ include("client.jl")
 include("util.jl")
 
 # dense linear algebra
-include("linalg.jl")
+include("linalg/linalg.jl")
 importall .LinAlg
 const ⋅ = dot
 const × = cross
@@ -286,10 +304,6 @@ importall .DFT
 include("dsp.jl")
 importall .DSP
 
-# system information
-include("sysinfo.jl")
-import .Sys.CPU_CORES
-
 # Numerical integration
 include("quadgk.jl")
 importall .QuadGK
@@ -299,10 +313,10 @@ include("fastmath.jl")
 importall .FastMath
 
 # libgit2 support
-include("libgit2.jl")
+include("libgit2/libgit2.jl")
 
 # package manager
-include("pkg.jl")
+include("pkg/pkg.jl")
 const Git = Pkg.Git
 
 # Stack frames and traces
@@ -314,19 +328,12 @@ include("profile.jl")
 importall .Profile
 
 # dates
-include("Dates.jl")
+include("dates/Dates.jl")
 import .Dates: Date, DateTime, now
 
 # sparse matrices, vectors, and sparse linear algebra
-include("sparse.jl")
+include("sparse/sparse.jl")
 importall .SparseArrays
-
-# Documentation
-
-include("markdown/Markdown.jl")
-include("docs/Docs.jl")
-using .Docs
-using .Markdown
 
 # threads
 include("threads.jl")
@@ -338,6 +345,12 @@ include("deprecated.jl")
 # Some basic documentation
 include("docs/helpdb.jl")
 include("docs/basedocs.jl")
+
+# Documentation -- should always be included last in sysimg.
+include("markdown/Markdown.jl")
+include("docs/Docs.jl")
+using .Docs, .Markdown
+Docs.loaddocs(Core.Inference.CoreDocs.DOCS)
 
 function __init__()
     # Base library init

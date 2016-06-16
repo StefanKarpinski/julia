@@ -35,8 +35,9 @@ end
 
 
 function check_addprocs_args(kwargs)
+    valid_kw_names = collect(keys(default_addprocs_params()))
     for keyname in kwargs
-        !(keyname[1] in [:dir, :exename, :exeflags, :topology]) && throw(ArgumentError("Invalid keyword argument $(keyname[1])"))
+        !(keyname[1] in valid_kw_names) && throw(ArgumentError("Invalid keyword argument $(keyname[1])"))
     end
 end
 
@@ -56,7 +57,7 @@ end
 function launch(manager::SSHManager, params::Dict, launched::Array, launch_ntfy::Condition)
     # Launch one worker on each unique host in parallel. Additional workers are launched later.
     # Wait for all launches to complete.
-    launch_tasks = cell(length(manager.machines))
+    launch_tasks = Vector{Any}(length(manager.machines))
 
     for (i,(machine, cnt)) in enumerate(manager.machines)
         let machine=machine, cnt=cnt
@@ -93,7 +94,7 @@ function launch_on_machine(manager::SSHManager, machine, cnt, params, launched, 
     if length(machine_bind) > 1
         exeflags = `--bind-to $(machine_bind[2]) $exeflags`
     end
-    exeflags = `$exeflags --worker`
+    exeflags = `$exeflags --worker $(cluster_cookie())`
 
     machine_def = split(machine_bind[1], ':')
     # if this machine def has a port number, add the port information to the ssh flags
@@ -217,15 +218,15 @@ end
 
 
 # LocalManager
-
 immutable LocalManager <: ClusterManager
     np::Integer
+    restrict::Bool  # Restrict binding to 127.0.0.1 only
 end
 
 addprocs(; kwargs...) = addprocs(Sys.CPU_CORES; kwargs...)
-function addprocs(np::Integer; kwargs...)
+function addprocs(np::Integer; restrict=true, kwargs...)
     check_addprocs_args(kwargs)
-    addprocs(LocalManager(np); kwargs...)
+    addprocs(LocalManager(np, restrict); kwargs...)
 end
 
 show(io::IO, manager::LocalManager) = println(io, "LocalManager()")
@@ -234,10 +235,11 @@ function launch(manager::LocalManager, params::Dict, launched::Array, c::Conditi
     dir = params[:dir]
     exename = params[:exename]
     exeflags = params[:exeflags]
+    bind_to = manager.restrict ? `127.0.0.1` : `$(LPROC.bind_addr)`
 
     for i in 1:manager.np
         io, pobj = open(pipeline(detach(
-                setenv(`$(julia_cmd(exename)) $exeflags --bind-to $(LPROC.bind_addr) --worker`, dir=dir)),
+                setenv(`$(julia_cmd(exename)) $exeflags --bind-to $bind_to --worker $(cluster_cookie())`, dir=dir)),
             stderr=STDERR), "r")
         wconfig = WorkerConfig()
         wconfig.process = pobj
@@ -331,15 +333,7 @@ function connect_w2w(pid::Int, config::WorkerConfig)
     (rhost, rport) = get(config.connect_at)
     config.host = rhost
     config.port = rport
-    if get(get(config.environ), :self_is_local, false) && get(get(config.environ), :r_is_local, false)
-        # If on localhost, use the loopback address - this addresses
-        # the special case of system suspend wherein the local ip
-        # may be changed upon system awake.
-        (s, bind_addr) = connect_to_worker("127.0.0.1", rport)
-    else
-        (s, bind_addr)= connect_to_worker(rhost, rport)
-    end
-
+    (s, bind_addr) = connect_to_worker(rhost, rport)
     (s,s)
 end
 
@@ -355,7 +349,7 @@ function socket_reuse_port()
     # TODO: Support OSX and change the above code to call setsockopt before bind once libuv provides
     # early access to a socket fd, i.e., before a bind call.
 
-    @linux_only begin
+    @static if is_linux()
         try
             rc = ccall(:jl_tcp_reuseport, Int32, (Ptr{Void}, ), s.handle)
             if rc > 0  # SO_REUSEPORT is unsupported, just return the ephemerally bound socket
@@ -365,7 +359,7 @@ function socket_reuse_port()
             end
             getsockname(s)
         catch e
-            # This is an issue only on systems with lots of client connections, hence delay the warning....
+            # This is an issue only on systems with lots of client connections, hence delay the warning
             nworkers() > 128 && warn_once("Error trying to reuse client port number, falling back to plain socket : ", e)
             # provide a clean new socket
             return TCPSocket()
@@ -375,24 +369,16 @@ function socket_reuse_port()
 end
 
 function connect_to_worker(host::AbstractString, port::Integer)
-    # Connect to the loopback port if requested host has the same ipaddress as self.
     s = socket_reuse_port()
-    if host == string(LPROC.bind_addr)
-        s = connect(s, "127.0.0.1", UInt16(port))
-    else
-        s = connect(s, host, UInt16(port))
-    end
+    connect(s, host, UInt16(port))
 
     # Avoid calling getaddrinfo if possible - involves a DNS lookup
     # host may be a stringified ipv4 / ipv6 address or a dns name
-    if host == "localhost"
-        bind_addr = "127.0.0.1"
-    else
-        try
-            bind_addr = string(parse(IPAddr,host))
-        catch
-            bind_addr = string(getaddrinfo(host))
-        end
+    bind_addr = nothing
+    try
+        bind_addr = string(parse(IPAddr,host))
+    catch
+        bind_addr = string(getaddrinfo(host))
     end
     (s, bind_addr)
 end
@@ -408,5 +394,3 @@ function kill(manager::ClusterManager, pid::Int, config::WorkerConfig)
                        # at our end, which will result in a cleanup of the worker.
     nothing
 end
-
-

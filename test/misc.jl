@@ -130,14 +130,8 @@ func4union(::Union{Type4Union,Int}) = ()
 let
     redir_err = "redirect_stderr(STDOUT)"
     exename = Base.julia_cmd()
-    script = "$redir_err; f(a::Number, b...) = 1;f(a, b::Number) = 1"
-    warning_str = readstring(`$exename -f -e $script`)
-    @test contains(warning_str, "f(Any, Number)")
-    @test contains(warning_str, "f(Number, Any...)")
-    @test contains(warning_str, "f(Number, Number)")
-
     script = "$redir_err; module A; f() = 1; end; A.f() = 1"
-    warning_str = readstring(`$exename -f -e $script`)
+    warning_str = readstring(`$exename --startup-file=no -e $script`)
     @test contains(warning_str, "f()")
 end
 
@@ -200,7 +194,11 @@ end
 @test Base.is_unix(:Darwin)
 @test Base.is_unix(:FreeBSD)
 @test_throws ArgumentError Base.is_unix(:BeOS)
-@unix_only @test Base.windows_version() == (0,0)
+if !is_windows()
+    @test Sys.windows_version() === (0, 0)
+else
+    @test (Sys.windows_version()::Tuple{Int,Int})[1] > 0
+end
 
 # Issue 14173
 module Tmp14173
@@ -211,11 +209,11 @@ whos(IOBuffer(), Tmp14173) # warm up
 @test @allocated(whos(IOBuffer(), Tmp14173)) < 10000
 
 ## test conversion from UTF-8 to UTF-16 (for Windows APIs)
-import Base: utf8to16, utf16to8
+import Base.Libc: transcode
 
 # empty arrays
-@test utf8to16(UInt8[]) == UInt16[]
-@test utf16to8(UInt16[]) == UInt8[]
+@test transcode(UInt16, UInt8[]) == UInt16[]
+@test transcode(UInt8, UInt16[]) == UInt8[]
 
 # UTF-8-like sequences
 V8 = [
@@ -306,15 +304,15 @@ I8 = [(s,map(UInt16,s)) for s in X8]
 
 for (X,Y,Z) in ((V8,V8,V8), (I8,V8,I8), (V8,I8,V8), (V8,V8,I8), (I8,V8,V8))
     for (a8, a16) in X
-        @test utf8to16(a8) == a16
+        @test transcode(UInt16, a8) == a16
         for (b8, b16) in Y
             ab8 = [a8; b8]
             ab16 = [a16; b16]
-            @test utf8to16(ab8) == ab16
+            @test transcode(UInt16, ab8) == ab16
             for (c8, c16) in Z
                 abc8 = [ab8; c8]
                 abc16 = [ab16; c16]
-                @test utf8to16(abc8) == abc16
+                @test transcode(UInt16, abc8) == abc16
             end
         end
     end
@@ -361,25 +359,31 @@ I16 = [
 
 for (X,Y,Z) in ((V16,V16,V16), (I16,V16,I16), (V16,I16,V16), (V16,V16,I16), (I16,V16,V16))
     for (a16, a8) in X
-        @test utf16to8(a16) == a8
-        @test utf8to16(a8) == a16
+        @test transcode(UInt8, a16) == a8
+        @test transcode(UInt16, a8) == a16
         for (b16, b8) in Y
             ab16 = [a16; b16]
             ab8 = [a8; b8]
-            @test utf16to8(ab16) == ab8
-            @test utf8to16(ab8) == ab16
+            @test transcode(UInt8, ab16) == ab8
+            @test transcode(UInt16, ab8) == ab16
             for (c16, c8) in Z
                 abc16 = [ab16; c16]
                 abc8 = [ab8; c8]
-                @test utf16to8(abc16) == abc8
-                @test utf8to16(abc8) == abc16
+                @test transcode(UInt8, abc16) == abc8
+                @test transcode(UInt16, abc8) == abc16
             end
         end
     end
 end
 
 # clipboard functionality
-@windows_only for str in ("Hello, world.","∀ x ∃ y","")
-    clipboard(str)
-    @test clipboard() == str
+if is_windows()
+    for str in ("Hello, world.", "∀ x ∃ y", "")
+        clipboard(str)
+        @test clipboard() == str
+    end
 end
+
+optstring = sprint(show, Base.JLOptions())
+@test startswith(optstring, "JLOptions(")
+@test endswith(optstring, ")")

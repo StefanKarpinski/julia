@@ -36,25 +36,6 @@ isposdef(x::Number) = imag(x)==0 && real(x) > 0
 stride1(x::Array) = 1
 stride1(x::StridedVector) = stride(x, 1)::Int
 
-import Base: mapreduce_seq_impl, AbsFun, Abs2Fun, AddFun
-
-mapreduce_seq_impl{T<:BlasReal}(::AbsFun, ::AddFun, a::Union{Array{T},StridedVector{T}}, ifirst::Int, ilast::Int) =
-    BLAS.asum(ilast-ifirst+1, pointer(a, ifirst), stride1(a))
-
-function mapreduce_seq_impl{T<:BlasReal}(::Abs2Fun, ::AddFun, a::Union{Array{T},StridedVector{T}}, ifirst::Int, ilast::Int)
-    n = ilast-ifirst+1
-    px = pointer(a, ifirst)
-    incx = stride1(a)
-    BLAS.dot(n, px, incx, px, incx)
-end
-
-function mapreduce_seq_impl{T<:BlasComplex}(::Abs2Fun, ::AddFun, a::Union{Array{T},StridedVector{T}}, ifirst::Int, ilast::Int)
-    n = ilast-ifirst+1
-    px = pointer(a, ifirst)
-    incx = stride1(a)
-    real(BLAS.dotc(n, px, incx, px, incx))
-end
-
 function norm{T<:BlasFloat, TI<:Integer}(x::StridedVector{T}, rx::Union{UnitRange{TI},Range{TI}})
     if minimum(rx) < 1 || maximum(rx) > length(x)
         throw(BoundsError(x, rx))
@@ -107,7 +88,7 @@ tril(M::Matrix, k::Integer) = tril!(copy(M), k)
 function gradient(F::Vector, h::Vector)
     n = length(F)
     T = typeof(one(eltype(F))/one(eltype(h)))
-    g = Array(T,n)
+    g = Array{T}(n)
     if n == 1
         g[1] = zero(T)
     elseif n > 1
@@ -139,7 +120,7 @@ function diagm{T}(v::AbstractVector{T}, k::Integer=0)
     A
 end
 
-diagm(x::Number) = (X = Array(typeof(x),1,1); X[1,1] = x; X)
+diagm(x::Number) = (X = Array{typeof(x)}(1,1); X[1,1] = x; X)
 
 function trace{T}(A::Matrix{T})
     n = checksquare(A)
@@ -150,8 +131,8 @@ function trace{T}(A::Matrix{T})
     t
 end
 
-function kron{T,S}(a::Matrix{T}, b::Matrix{S})
-    R = Array(promote_type(T,S), size(a,1)*size(b,1), size(a,2)*size(b,2))
+function kron{T,S}(a::AbstractMatrix{T}, b::AbstractMatrix{S})
+    R = Array{promote_type(T,S)}(size(a,1)*size(b,1), size(a,2)*size(b,2))
     m = 1
     for j = 1:size(a,2), l = 1:size(b,2), i = 1:size(a,1)
         aij = a[i,j]
@@ -163,11 +144,11 @@ function kron{T,S}(a::Matrix{T}, b::Matrix{S})
     R
 end
 
-kron(a::Number, b::Union{Number, Vector, Matrix}) = a * b
-kron(a::Union{Vector, Matrix}, b::Number) = a * b
-kron(a::Vector, b::Vector)=vec(kron(reshape(a,length(a),1),reshape(b,length(b),1)))
-kron(a::Matrix, b::Vector)=kron(a,reshape(b,length(b),1))
-kron(a::Vector, b::Matrix)=kron(reshape(a,length(a),1),b)
+kron(a::Number, b::Union{Number, AbstractVecOrMat}) = a * b
+kron(a::AbstractVecOrMat, b::Number) = a * b
+kron(a::AbstractVector, b::AbstractVector)=vec(kron(reshape(a,length(a),1),reshape(b,length(b),1)))
+kron(a::AbstractMatrix, b::AbstractVector)=kron(a,reshape(b,length(b),1))
+kron(a::AbstractVector, b::AbstractMatrix)=kron(reshape(a,length(a),1),b)
 
 ^(A::Matrix, p::Integer) = p < 0 ? inv(A^-p) : Base.power_by_squaring(A,p)
 
@@ -460,12 +441,12 @@ function pinv{T}(A::StridedMatrix{T}, tol::Real)
     m, n = size(A)
     Tout = typeof(zero(T)/sqrt(one(T) + one(T)))
     if m == 0 || n == 0
-        return Array(Tout, n, m)
+        return Array{Tout}(n, m)
     end
     if istril(A)
         if istriu(A)
             maxabsA = maximum(abs(diag(A)))
-            B = zeros(Tout, n, m);
+            B = zeros(Tout, n, m)
             for i = 1:min(m, n)
                 if abs(A[i,i]) > tol*maxabsA
                     Aii = inv(A[i,i])
@@ -474,7 +455,7 @@ function pinv{T}(A::StridedMatrix{T}, tol::Real)
                     end
                 end
             end
-            return B;
+            return B
         end
     end
     SVD         = svdfact(A, thin=true)

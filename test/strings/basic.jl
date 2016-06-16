@@ -1,5 +1,12 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
+# constructors
+let d = [0x61,0x62,0x63,0x21]
+    @test String(d) == "abc!"
+    @test String(d).data === d # String(d) should not make a copy
+end
+@test String("abc!") == "abc!"
+
 # {starts,ends}with
 @test startswith("abcd", 'a')
 @test startswith("abcd", "a")
@@ -41,21 +48,21 @@ end
 # issue #6027
 let
     # make symbol with invalid char
-    sym = symbol(Char(0xdcdb))
+    sym = Symbol(Char(0xdcdb))
     @test string(sym) == string(Char(0xdcdb))
     @test expand(sym) === sym
     res = string(parse(string(Char(0xdcdb)," = 1"),1,raise=false)[1])
     @test res == """\$(Expr(:error, "invalid character \\\"\\udcdb\\\"\"))"""
 end
 
-@test symbol("asdf") === :asdf
-@test symbol(:abc,"def",'g',"hi",0) === :abcdefghi0
+@test Symbol("asdf") === :asdf
+@test Symbol(:abc,"def",'g',"hi",0) === :abcdefghi0
 @test :a < :b
 @test startswith(string(gensym("asdf")),"##asdf#")
 @test gensym("asdf") != gensym("asdf")
 @test gensym() != gensym()
 @test startswith(string(gensym()),"##")
-@test_throws ArgumentError symbol("ab\0")
+@test_throws ArgumentError Symbol("ab\0")
 @test_throws ArgumentError gensym("ab\0")
 
 # issue #6949
@@ -85,6 +92,18 @@ end
 @test checkbounds("hello", 2)
 @test checkbounds("hello", 1:5)
 @test checkbounds("hello", [1:5;])
+
+# issue #15624 (indexing with out of bounds empty range)
+@test ""[10:9] == ""
+@test "hello"[10:9] == ""
+@test "hellø"[10:9] == ""
+@test SubString("hello", 1, 6)[10:9] == ""
+@test SubString("hello", 1, 0)[10:9] == ""
+@test SubString("hellø", 1, 6)[10:9] == ""
+@test SubString("hellø", 1, 0)[10:9] == ""
+@test SubString("", 1, 6)[10:9] == ""
+@test SubString("", 1, 0)[10:9] == ""
+
 
 #=
 # issue #7764
@@ -125,12 +144,6 @@ end
 @test [parse(Float32,x) for x in split("0,1\n",",")][2] == 1.0
 @test_throws ArgumentError parse(Float32,split("0,1 X\n",",")[2])
 
-#more ascii tests
-@test convert(ASCIIString, UInt8[32,107,75], "*") == " kK"
-@test convert(ASCIIString, UInt8[132,107,75], "*") == "*kK"
-@test convert(ASCIIString, UInt8[], "*") == ""
-@test convert(ASCIIString, UInt8[255], "*") == "*"
-
 @test ucfirst("Hola")=="Hola"
 @test ucfirst("hola")=="Hola"
 @test ucfirst("")==""
@@ -141,13 +154,13 @@ end
 @test lcfirst("")==""
 @test lcfirst("*")=="*"
 
-#more UTF8String tests
-@test convert(UTF8String, UInt8[32,107,75], "*") == " kK"
-@test convert(UTF8String, UInt8[132,107,75], "*") == "*kK"
-@test convert(UTF8String, UInt8[32,107,75], "αβ") == " kK"
-@test convert(UTF8String, UInt8[132,107,75], "αβ") == "αβkK"
-@test convert(UTF8String, UInt8[], "*") == ""
-@test convert(UTF8String, UInt8[255], "αβ") == "αβ"
+#more String tests
+@test convert(String, UInt8[32,107,75], "*") == " kK"
+@test convert(String, UInt8[132,107,75], "*") == "*kK"
+@test convert(String, UInt8[32,107,75], "αβ") == " kK"
+@test convert(String, UInt8[132,107,75], "αβ") == "αβkK"
+@test convert(String, UInt8[], "*") == ""
+@test convert(String, UInt8[255], "αβ") == "αβ"
 
 # test AbstractString functions at beginning of string.jl
 immutable tstStringType <: AbstractString
@@ -159,11 +172,10 @@ tstr = tstStringType("12");
 
 gstr = GenericString("12");
 @test typeof(string(gstr))==GenericString
-@test bytestring()==""
 
 @test convert(Array{UInt8}, gstr) ==[49;50]
 @test convert(Array{Char,1}, gstr) ==['1';'2']
-@test convert(Symbol, gstr)==symbol("12")
+@test convert(Symbol, gstr)==Symbol("12")
 
 @test getindex(gstr, Bool(1))=='1'
 @test getindex(gstr,Bool(1):Bool(1))=="1"
@@ -174,7 +186,7 @@ gstr = GenericString("12");
 @test map(uppercase, "foó") == "FOÓ"
 @test chr2ind("fóobar",3) == 4
 
-@test symbol(gstr)==symbol("12")
+@test Symbol(gstr)==Symbol("12")
 
 @test_throws ErrorException sizeof(gstr)
 
@@ -206,15 +218,14 @@ end
 # issue #11142
 s = "abcdefghij"
 sp = pointer(s)
-@test ascii(sp) == s
-@test ascii(sp,5) == "abcde"
-@test typeof(ascii(sp)) == ASCIIString
-@test typeof(utf8(sp)) == UTF8String
+@test unsafe_string(sp) == s
+@test unsafe_string(sp,5) == "abcde"
+@test typeof(unsafe_string(sp)) == String
 s = "abcde\uff\u2000\U1f596"
 sp = pointer(s)
-@test utf8(sp) == s
-@test utf8(sp,5) == "abcde"
-@test typeof(utf8(sp)) == UTF8String
+@test unsafe_string(sp) == s
+@test unsafe_string(sp,5) == "abcde"
+@test typeof(unsafe_string(sp)) == String
 
 @test get(tryparse(BigInt, "1234567890")) == BigInt(1234567890)
 @test isnull(tryparse(BigInt, "1234567890-"))
@@ -232,8 +243,8 @@ for T in [BigInt, Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64, Int1
     @test isnull(tryparse(T, "1\0"))
 end
 let s = normalize_string("tést",:NFKC)
-    @test bytestring(Base.unsafe_convert(Cstring, s)) == s
-    @test bytestring(convert(Cstring, symbol(s))) == s
+    @test unsafe_string(Base.unsafe_convert(Cstring, s)) == s
+    @test unsafe_string(convert(Cstring, Symbol(s))) == s
     @test wstring(Base.unsafe_convert(Cwstring, wstring(s))) == s
 end
 let s = "ba\0d"
@@ -241,12 +252,12 @@ let s = "ba\0d"
     @test_throws ArgumentError Base.unsafe_convert(Cwstring, wstring(s))
 end
 
-cstrdup(s) = @windows? ccall(:_strdup, Cstring, (Cstring,), s) : ccall(:strdup, Cstring, (Cstring,), s)
+cstrdup(s) = @static is_windows() ? ccall(:_strdup, Cstring, (Cstring,), s) : ccall(:strdup, Cstring, (Cstring,), s)
 let p = cstrdup("hello")
-    @test bytestring(p) == "hello" == pointer_to_string(cstrdup(p), true)
+    @test unsafe_string(p) == "hello" == unsafe_wrap(String, cstrdup(p), true)
     Libc.free(p)
 end
-let p = @windows? ccall(:_wcsdup, Cwstring, (Cwstring,), "tést") : ccall(:wcsdup, Cwstring, (Cwstring,), "tést")
+let p = @static is_windows() ? ccall(:_wcsdup, Cwstring, (Cwstring,), "tést") : ccall(:wcsdup, Cwstring, (Cwstring,), "tést")
     @test wstring(p) == "tést"
     Libc.free(p)
 end
@@ -272,11 +283,6 @@ c[1] = 'A'
 @test isvalid(utf32("a")) == true
 @test isvalid(utf32("\x00")) == true
 @test isvalid(UTF32String, UInt32[0xd800,0]) == false
-
-# Issue #11241
-
-@test isvalid(ASCIIString, "is_valid_ascii") == true
-@test isvalid(ASCIIString, "Σ_not_valid_ascii") == false
 
 # test all edge conditions
 for (val, pass) in (
@@ -314,7 +320,7 @@ for (val, pass) in (
         (b"\udc00\u0100", false),
         (b"\udc00\ud800", false)
         )
-    @test isvalid(UTF8String, val) == pass
+    @test isvalid(String, val) == pass
 end
 for (val, pass) in (
         (UInt16[0x0000], true),
@@ -346,8 +352,7 @@ for (val, pass) in (
 end
 
 # Issue #11203
-@test isvalid(ASCIIString,UInt8[]) == true
-@test isvalid(UTF8String, UInt8[]) == true
+@test isvalid(String, UInt8[]) == true
 @test isvalid(UTF16String,UInt16[]) == true
 @test isvalid(UTF32String,UInt32[]) == true
 
@@ -356,18 +361,18 @@ end
 # then single continuation bytes and lead bytes with no following continuation bytes (false)
 for (rng,flg) in ((0:0x7f, true), (0x80:0xff, false))
     for byt in rng
-        @test isvalid(UTF8String, UInt8[byt]) == flg
+        @test isvalid(String, UInt8[byt]) == flg
     end
 end
 # Check overlong lead bytes for 2-character sequences (false)
 for byt = 0xc0:0xc1
-    @test isvalid(UTF8String, UInt8[byt,0x80]) == false
+    @test isvalid(String, UInt8[byt,0x80]) == false
 end
 # Check valid lead-in to two-byte sequences (true)
 for byt = 0xc2:0xdf
     for (rng,flg) in ((0x00:0x7f, false), (0x80:0xbf, true), (0xc0:0xff, false))
         for cont in rng
-            @test isvalid(UTF8String, UInt8[byt, cont]) == flg
+            @test isvalid(String, UInt8[byt, cont]) == flg
         end
     end
 end
@@ -375,11 +380,11 @@ end
 for r1 in (0xe0:0xec, 0xee:0xef)
     for byt = r1
         # Check for short sequence
-        @test isvalid(UTF8String, UInt8[byt]) == false
+        @test isvalid(String, UInt8[byt]) == false
         for (rng,flg) in ((0x00:0x7f, false), (0x80:0xbf, true), (0xc0:0xff, false))
             for cont in rng
-                @test isvalid(UTF8String, UInt8[byt, cont]) == false
-                @test isvalid(UTF8String, UInt8[byt, cont, 0x80]) == flg
+                @test isvalid(String, UInt8[byt, cont]) == false
+                @test isvalid(String, UInt8[byt, cont, 0x80]) == flg
             end
         end
     end
@@ -388,8 +393,8 @@ end
 # Check for short sequence, or start of surrogate pair
 for (rng,flg) in ((0x00:0x7f, false), (0x80:0x9f, true), (0xa0:0xff, false))
     for cont in rng
-        @test isvalid(UTF8String, UInt8[0xed, cont]) == false
-        @test isvalid(UTF8String, UInt8[0xed, cont, 0x80]) == flg
+        @test isvalid(String, UInt8[0xed, cont]) == false
+        @test isvalid(String, UInt8[0xed, cont, 0x80]) == flg
     end
 end
 # Check valid four-byte sequences
@@ -403,22 +408,22 @@ for byt = 0xf0:0xf4
     end
     for (rng,flg) in r0
         for cont in rng
-            @test isvalid(UTF8String, UInt8[byt, cont]) == false
-            @test isvalid(UTF8String, UInt8[byt, cont, 0x80]) == false
-            @test isvalid(UTF8String, UInt8[byt, cont, 0x80, 0x80]) == flg
+            @test isvalid(String, UInt8[byt, cont]) == false
+            @test isvalid(String, UInt8[byt, cont, 0x80]) == false
+            @test isvalid(String, UInt8[byt, cont, 0x80, 0x80]) == flg
         end
     end
 end
 # Check five-byte sequences, should be invalid
 for byt = 0xf8:0xfb
-    @test isvalid(UTF8String, UInt8[byt, 0x80, 0x80, 0x80, 0x80]) == false
+    @test isvalid(String, UInt8[byt, 0x80, 0x80, 0x80, 0x80]) == false
 end
 # Check six-byte sequences, should be invalid
 for byt = 0xfc:0xfd
-    @test isvalid(UTF8String, UInt8[byt, 0x80, 0x80, 0x80, 0x80, 0x80]) == false
+    @test isvalid(String, UInt8[byt, 0x80, 0x80, 0x80, 0x80, 0x80]) == false
 end
 # Check seven-byte sequences, should be invalid
-@test isvalid(UTF8String, UInt8[0xfe, 0x80, 0x80, 0x80, 0x80, 0x80]) == false
+@test isvalid(String, UInt8[0xfe, 0x80, 0x80, 0x80, 0x80, 0x80]) == false
 
 # 11482
 
@@ -432,8 +437,7 @@ let s = "abcdef", u8 = "abcdef\uff", u16 = utf16(u8), u32 = utf32(u8),
     @test isvalid(u8)
     @test isvalid(u16)
     @test isvalid(u32)
-    @test isvalid(ASCIIString, s)
-    @test isvalid(UTF8String,  u8)
+    @test isvalid(String, u8)
     @test isvalid(UTF16String, u16)
     @test isvalid(UTF32String, u32)
 end
@@ -460,18 +464,16 @@ end
 @test lcfirst(utf32("a")) == "a"
 @test ucfirst(utf32("A")) == "A"
 
-# issue # 11464: uppercase/lowercase of UTF16String becomes a UTF8String
+# issue # 11464: uppercase/lowercase of UTF16String becomes a String
 str = "abcdef\uff\uffff\u10ffffABCDEF"
-@test typeof(uppercase("abcdef")) == ASCIIString
-@test typeof(uppercase(utf8(str))) == UTF8String
+@test typeof(uppercase("abcdef")) == String
 @test typeof(uppercase(utf16(str))) == UTF16String
 @test typeof(uppercase(utf32(str))) == UTF32String
-@test typeof(lowercase("ABCDEF")) == ASCIIString
-@test typeof(lowercase(utf8(str))) == UTF8String
+@test typeof(lowercase("ABCDEF")) == String
 @test typeof(lowercase(utf16(str))) == UTF16String
 @test typeof(lowercase(utf32(str))) == UTF32String
 
-foomap(ch) = (ch > 65)
+foomap(ch) = (ch > Char(65))
 foobar(ch) = Char(0xd800)
 foobaz(ch) = reinterpret(Char, typemax(UInt32))
 @test_throws UnicodeError map(foomap, utf16(str))
@@ -480,6 +482,16 @@ foobaz(ch) = reinterpret(Char, typemax(UInt32))
 
 @test "a".*["b","c"] == ["ab","ac"]
 @test ["b","c"].*"a" == ["ba","ca"]
-@test utf8("a").*["b","c"] == ["ab","ac"]
-@test "a".*map(utf8,["b","c"]) == ["ab","ac"]
 @test ["a","b"].*["c","d"]' == ["ac" "ad"; "bc" "bd"]
+
+# Make sure NULL pointers are handled consistently by String
+@test_throws ArgumentError unsafe_string(Ptr{UInt8}(0))
+@test_throws ArgumentError unsafe_string(Ptr{UInt8}(0), 10)
+
+# ascii works on ASCII strings and fails on non-ASCII strings
+@test ascii("Hello, world") == "Hello, world"
+@test typeof(ascii("Hello, world")) == String
+@test ascii(utf32("Hello, world")) == "Hello, world"
+@test typeof(ascii(utf32("Hello, world"))) == String
+@test_throws ArgumentError ascii("Hello, ∀")
+@test_throws ArgumentError ascii(utf32("Hello, ∀"))

@@ -44,19 +44,18 @@ static jl_array_t *_new_array_(jl_value_t *atype, uint32_t ndims, size_t *dims,
                                int isunboxed, int elsz)
 {
     size_t i, tot, nel=1;
-    wideint_t prod;
     void *data;
     jl_array_t *a;
 
     for(i=0; i < ndims; i++) {
-        prod = (wideint_t)nel * (wideint_t)dims[i];
+        wideint_t prod = (wideint_t)nel * (wideint_t)dims[i];
         if (prod > (wideint_t) MAXINTVAL)
             jl_error("invalid Array dimensions");
         nel = prod;
     }
 
     if (isunboxed) {
-        prod = (wideint_t)elsz * (wideint_t)nel;
+        wideint_t prod = (wideint_t)elsz * (wideint_t)nel;
         if (prod > (wideint_t) MAXINTVAL)
             jl_error("invalid Array size");
         tot = prod;
@@ -66,7 +65,7 @@ static jl_array_t *_new_array_(jl_value_t *atype, uint32_t ndims, size_t *dims,
         }
     }
     else {
-        prod = (wideint_t)sizeof(void*) * (wideint_t)nel;
+        wideint_t prod = (wideint_t)sizeof(void*) * (wideint_t)nel;
         if (prod > (wideint_t) MAXINTVAL)
             jl_error("invalid Array size");
         tot = prod;
@@ -148,12 +147,28 @@ jl_array_t *jl_new_array_for_deserialization(jl_value_t *atype, uint32_t ndims, 
     return _new_array_(atype, ndims, dims, isunboxed, elsz);
 }
 
-JL_DLLEXPORT jl_array_t *jl_reshape_array(jl_value_t *atype, jl_array_t *data,
-                                          jl_value_t *dims)
+#ifndef NDEBUG
+static inline int is_ntuple_long(jl_value_t *v)
 {
-    size_t i;
+    if (!jl_is_tuple(v))
+        return 0;
+    size_t nfields = jl_nfields(v);
+    for (size_t i = 0; i < nfields; i++) {
+        if (jl_field_type(jl_typeof(v), i) != (jl_value_t*)jl_long_type) {
+            return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
+JL_DLLEXPORT jl_array_t *jl_reshape_array(jl_value_t *atype, jl_array_t *data,
+                                          jl_value_t *_dims)
+{
     jl_array_t *a;
-    size_t ndims = jl_nfields(dims);
+    size_t ndims = jl_nfields(_dims);
+    assert(is_ntuple_long(_dims));
+    size_t *dims = (size_t*)_dims;
 
     int ndimwords = jl_array_ndimwords(ndims);
     int tsz = JL_ARRAY_ALIGN(sizeof(jl_array_t) + ndimwords*sizeof(size_t) + sizeof(void*), JL_SMALL_BYTE_ALIGNMENT);
@@ -173,7 +188,6 @@ JL_DLLEXPORT jl_array_t *jl_reshape_array(jl_value_t *atype, jl_array_t *data,
         a->elsize = sizeof(void*);
         a->flags.ptrarray = 1;
     }
-    JL_GC_PUSH1(&a);
 
     jl_array_t *owner = data;
     // if data is itself a shared wrapper,
@@ -190,7 +204,7 @@ JL_DLLEXPORT jl_array_t *jl_reshape_array(jl_value_t *atype, jl_array_t *data,
     data->flags.isshared = 1;
 
     if (ndims == 1) {
-        size_t l = ((size_t*)jl_data_ptr(dims))[0];
+        size_t l = dims[0];
 #ifdef STORE_ARRAY_LEN
         a->length = l;
 #endif
@@ -199,10 +213,10 @@ JL_DLLEXPORT jl_array_t *jl_reshape_array(jl_value_t *atype, jl_array_t *data,
     }
     else {
         size_t *adims = &a->nrows;
-        size_t l=1;
+        size_t l = 1;
         wideint_t prod;
-        for(i=0; i < ndims; i++) {
-            adims[i] = ((size_t*)jl_data_ptr(dims))[i];
+        for (size_t i = 0; i < ndims; i++) {
+            adims[i] = dims[i];
             prod = (wideint_t)l * (wideint_t)adims[i];
             if (prod > (wideint_t) MAXINTVAL)
                 jl_error("invalid Array dimensions");
@@ -212,7 +226,6 @@ JL_DLLEXPORT jl_array_t *jl_reshape_array(jl_value_t *atype, jl_array_t *data,
         a->length = l;
 #endif
     }
-    JL_GC_POP();
 
     return a;
 }
@@ -261,19 +274,22 @@ JL_DLLEXPORT jl_array_t *jl_ptr_to_array_1d(jl_value_t *atype, void *data,
 }
 
 JL_DLLEXPORT jl_array_t *jl_ptr_to_array(jl_value_t *atype, void *data,
-                                         jl_value_t *dims, int own_buffer)
+                                         jl_value_t *_dims, int own_buffer)
 {
-    size_t i, elsz, nel=1;
+    size_t elsz, nel = 1;
     jl_array_t *a;
-    size_t ndims = jl_nfields(dims);
+    size_t ndims = jl_nfields(_dims);
     wideint_t prod;
-
-    for(i=0; i < ndims; i++) {
-        prod = (wideint_t)nel * (wideint_t)jl_unbox_long(jl_fieldref(dims, i));
+    assert(is_ntuple_long(_dims));
+    size_t *dims = (size_t*)_dims;
+    for (size_t i = 0; i < ndims; i++) {
+        prod = (wideint_t)nel * (wideint_t)dims[i];
         if (prod > (wideint_t) MAXINTVAL)
             jl_error("invalid Array dimensions");
         nel = prod;
     }
+    if (__unlikely(ndims == 1))
+        return jl_ptr_to_array_1d(atype, data, nel, own_buffer);
     jl_value_t *el_type = jl_tparam0(atype);
 
     int isunboxed = store_unboxed(el_type);
@@ -306,30 +322,16 @@ JL_DLLEXPORT jl_array_t *jl_ptr_to_array(jl_value_t *atype, void *data,
         a->flags.how = 0;
     }
 
-    if (ndims == 1) {
-        a->nrows = nel;
-        a->maxsize = nel;
-    }
-    else {
-        size_t *adims = &a->nrows;
-        // jl_fieldref can allocate
-        JL_GC_PUSH1(&a);
-        for(i=0; i < ndims; i++) {
-            adims[i] = jl_unbox_long(jl_fieldref(dims, i));
-        }
-        JL_GC_POP();
-    }
+    assert(ndims != 1); // handled above
+    memcpy(&a->nrows, dims, ndims * sizeof(size_t));
     return a;
 }
 
-JL_DLLEXPORT jl_array_t *jl_new_array(jl_value_t *atype, jl_value_t *dims)
+JL_DLLEXPORT jl_array_t *jl_new_array(jl_value_t *atype, jl_value_t *_dims)
 {
-    size_t ndims = jl_nfields(dims);
-    size_t *adims = (size_t*)alloca(ndims*sizeof(size_t));
-    size_t i;
-    for(i=0; i < ndims; i++)
-        adims[i] = jl_unbox_long(jl_fieldref(dims,i));
-    return _new_array(atype, ndims, adims);
+    size_t ndims = jl_nfields(_dims);
+    assert(is_ntuple_long(_dims));
+    return _new_array(atype, ndims, (size_t*)_dims);
 }
 
 JL_DLLEXPORT jl_array_t *jl_alloc_array_1d(jl_value_t *atype, size_t nr)
@@ -362,10 +364,8 @@ JL_DLLEXPORT jl_value_t *jl_array_to_string(jl_array_t *a)
 {
     if (!jl_typeis(a, jl_array_uint8_type))
         jl_type_error("jl_array_to_string", (jl_value_t*)jl_array_uint8_type, (jl_value_t*)a);
-    jl_datatype_t *string_type = u8_isvalid((char*)a->data, jl_array_len(a)) == 1 ? // ASCII
-        jl_ascii_string_type : jl_utf8_string_type;
     jl_value_t *s = (jl_value_t*)jl_gc_alloc_1w();
-    jl_set_typeof(s, string_type);
+    jl_set_typeof(s, jl_string_type);
     jl_set_nth_field(s, 0, (jl_value_t*)a);
     return s;
 }
@@ -384,7 +384,7 @@ JL_DLLEXPORT jl_value_t *jl_cstr_to_string(const char *str)
     return jl_pchar_to_string(str, strlen(str));
 }
 
-JL_DLLEXPORT jl_array_t *jl_alloc_cell_1d(size_t n)
+JL_DLLEXPORT jl_array_t *jl_alloc_vec_any(size_t n)
 {
     return jl_alloc_array_1d(jl_array_any_type, n);
 }
@@ -595,13 +595,15 @@ static void array_resize_buffer(jl_array_t *a, size_t newlen, size_t oldlen, siz
         }
         memcpy(newdata + offsnb, (char*)a->data, oldnbytes);
     }
+    assert(oldlen == a->nrows &&
+           "Race condition detected: recursive resizing on the same array.");
 
     a->data = newdata + offsnb;
     a->flags.isshared = 0;
     if (a->flags.ptrarray || es==1)
         memset(newdata+offsnb+oldnbytes, 0, nbytes-oldnbytes-offsnb);
     if (a->flags.how == 1)
-        jl_gc_wb_buf(a, newdata);
+        jl_gc_wb_buf(a, newdata, newlen * es);
     a->maxsize = newlen;
 }
 
@@ -757,19 +759,19 @@ JL_DLLEXPORT void jl_array_del_beg(jl_array_t *a, size_t dec)
     a->offset = newoffs;
 }
 
-JL_DLLEXPORT void jl_cell_1d_push(jl_array_t *a, jl_value_t *item)
+JL_DLLEXPORT void jl_array_ptr_1d_push(jl_array_t *a, jl_value_t *item)
 {
     assert(jl_typeis(a, jl_array_any_type));
     jl_array_grow_end(a, 1);
-    jl_cellset(a, jl_array_dim(a,0)-1, item);
+    jl_array_ptr_set(a, jl_array_dim(a,0)-1, item);
 }
 
-JL_DLLEXPORT void jl_cell_1d_push2(jl_array_t *a, jl_value_t *b, jl_value_t *c)
+JL_DLLEXPORT void jl_array_ptr_1d_push2(jl_array_t *a, jl_value_t *b, jl_value_t *c)
 {
     assert(jl_typeis(a, jl_array_any_type));
     jl_array_grow_end(a, 2);
-    jl_cellset(a, jl_array_dim(a,0)-2, b);
-    jl_cellset(a, jl_array_dim(a,0)-1, c);
+    jl_array_ptr_set(a, jl_array_dim(a,0)-2, b);
+    jl_array_ptr_set(a, jl_array_dim(a,0)-1, c);
 }
 
 JL_DLLEXPORT jl_value_t *(jl_array_data_owner)(jl_array_t *a)

@@ -23,12 +23,53 @@
 #if defined(_CPU_X86_64_) || defined(_CPU_X86_)
 #  include <immintrin.h>
 #endif
+#ifndef _OS_WINDOWS_
+#  include <pthread.h>
+#endif
+#include <signal.h>
+
+typedef struct {
+    jl_taggedvalue_t *freelist;   // root of list of free objects
+    jl_taggedvalue_t *newpages;   // root of list of chunks of free objects
+    uint16_t end_offset; // stored to avoid computing it at each allocation
+    uint16_t osize;      // size of objects in this pool
+    uint16_t nfree;      // number of free objects in page pointed into by free_list
+} jl_gc_pool_t;
+
+typedef struct {
+    // variable for tracking weak references
+    arraylist_t weak_refs;
+
+    // variables for tracking malloc'd arrays
+    struct _mallocarray_t *mallocarrays;
+    struct _mallocarray_t *mafreelist;
+
+    // variables for tracking big objects
+    struct _bigval_t *big_objects;
+
+    // variables for tracking "remembered set"
+    arraylist_t rem_bindings;
+    arraylist_t _remset[2]; // contains jl_value_t*
+    // lower bound of the number of pointers inside remembered values
+    int remset_nptr;
+    arraylist_t *remset;
+    arraylist_t *last_remset;
+
+    // variables for allocating objects from pools
+#ifdef _P64
+#define JL_GC_N_POOLS 41
+#else
+#define JL_GC_N_POOLS 43
+#endif
+    jl_gc_pool_t norm_pools[JL_GC_N_POOLS];
+} jl_thread_heap_t;
 
 // This includes all the thread local states we care about for a thread.
 #define JL_MAX_BT_SIZE 80000
 typedef struct _jl_tls_states_t {
     struct _jl_gcframe_t *pgcstack;
     struct _jl_value_t *exception_in_transit;
+    volatile size_t *safepoint;
     // Whether it is safe to execute GC at the same time.
 #define JL_GC_STATE_WAITING 1
     // gc_state = 1 means the thread is doing GC or is waiting for the GC to
@@ -39,7 +80,7 @@ typedef struct _jl_tls_states_t {
     volatile int8_t gc_state;
     volatile int8_t in_finalizer;
     int8_t disable_gc;
-    struct _jl_thread_heap_t *heap;
+    volatile sig_atomic_t defer_signal;
     struct _jl_module_t *current_module;
     struct _jl_task_t *volatile current_task;
     struct _jl_task_t *root_task;
@@ -52,7 +93,22 @@ typedef struct _jl_tls_states_t {
     jl_jmp_buf *safe_restore;
     int16_t tid;
     size_t bt_size;
-    uintptr_t bt_data[JL_MAX_BT_SIZE + 1];
+    // JL_MAX_BT_SIZE + 1 elements long
+    uintptr_t *bt_data;
+    // Atomically set by the sender, reset by the handler.
+    volatile sig_atomic_t signal_request;
+    // Allow the sigint to be raised asynchronously
+    // this is limited to the few places we do synchronous IO
+    // we can make this more general (similar to defer_signal) if necessary
+    volatile sig_atomic_t io_wait;
+    jl_thread_heap_t heap;
+#ifndef _OS_WINDOWS_
+    // These are only used on unix now
+    pthread_t system_id;
+    void *signal_stack;
+#endif
+    // Counter to disable finalizer **on the current thread**
+    int finalizers_inhibited;
 } jl_tls_states_t;
 
 #ifdef __MIC__
@@ -72,6 +128,17 @@ typedef struct _jl_tls_states_t {
 #  define jl_cpu_wake() ((void)0)
 #  define JL_CPU_WAKE_NOOP 1
 #endif
+
+// Copied from libuv. Add `JL_CONST_FUNC` so that the compiler
+// can optimize this better.
+static inline unsigned long JL_CONST_FUNC jl_thread_self(void)
+{
+#ifdef _OS_WINDOWS_
+    return (unsigned long)GetCurrentThreadId();
+#else
+    return (unsigned long)pthread_self();
+#endif
+}
 
 /**
  * Thread synchronization primitives:
@@ -105,6 +172,8 @@ typedef struct _jl_tls_states_t {
 // the __atomic builtins or c11 atomics with GNU extension or c11 _Generic
 #  define jl_atomic_compare_exchange(obj, expected, desired)    \
     __sync_val_compare_and_swap(obj, expected, desired)
+#  define jl_atomic_exchange(obj, desired)              \
+    __atomic_exchange_n(obj, desired, __ATOMIC_SEQ_CST)
 // TODO: Maybe add jl_atomic_compare_exchange_weak for spin lock
 #  define jl_atomic_store(obj, val)                     \
     __atomic_store_n(obj, val, __ATOMIC_SEQ_CST)
@@ -117,7 +186,10 @@ typedef struct _jl_tls_states_t {
 // Workaround a GCC bug when using store with release order by using the
 // stronger version instead.
 // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=67458
-#    define jl_atomic_store_release(obj, val) jl_atomic_store(obj, val)
+#    define jl_atomic_store_release(obj, val) do {      \
+        jl_signal_fence();                              \
+        __atomic_store_n(obj, val, __ATOMIC_RELEASE);   \
+    } while (0)
 #  endif
 #  define jl_atomic_load(obj)                   \
     __atomic_load_n(obj, __ATOMIC_SEQ_CST)
@@ -177,6 +249,31 @@ jl_atomic_compare_exchange(volatile T *obj, T2 expected, T3 desired)
 {
     return (T)_InterlockedCompareExchange64((volatile __int64*)obj,
                                             (__int64)desired, (__int64)expected);
+}
+// atomic exchange
+template<typename T, typename T2>
+static inline typename std::enable_if<sizeof(T) == 1, T>::type
+jl_atomic_exchange(volatile T *obj, T2 val)
+{
+    return _InterlockedExchange8((volatile char*)obj, (char)val);
+}
+template<typename T, typename T2>
+static inline typename std::enable_if<sizeof(T) == 2, T>::type
+jl_atomic_exchange(volatile T *obj, T2 val)
+{
+    return _InterlockedExchange16((volatile short*)obj, (short)val);
+}
+template<typename T, typename T2>
+static inline typename std::enable_if<sizeof(T) == 4, T>::type
+jl_atomic_exchange(volatile T *obj, T2 val)
+{
+    return _InterlockedExchange((volatile LONG*)obj, (LONG)val);
+}
+template<typename T, typename T2>
+static inline typename std::enable_if<sizeof(T) == 8, T>::type
+jl_atomic_exchange(volatile T *obj, T2 val)
+{
+    return _InterlockedExchange64((volatile __int64*)obj, (__int64)val);
 }
 // atomic stores
 template<typename T, typename T2>
@@ -240,11 +337,25 @@ JL_DLLEXPORT void (jl_cpu_wake)(void);
 
 // Accessing the tls variables, gc safepoint and gc states
 JL_DLLEXPORT JL_CONST_FUNC jl_tls_states_t *(jl_get_ptls_states)(void);
+// This triggers a SegFault when we are in GC
+// Assign it to a variable to make sure the compiler emit the load
+// and to avoid Clang warning for -Wunused-volatile-lvalue
+#define jl_gc_safepoint() do {                                          \
+        jl_signal_fence();                                              \
+        size_t safepoint_load = *jl_get_ptls_states()->safepoint;       \
+        jl_signal_fence();                                              \
+        (void)safepoint_load;                                           \
+    } while (0)
+#define jl_sigint_safepoint() do {                                      \
+        jl_signal_fence();                                              \
+        size_t safepoint_load = jl_get_ptls_states()->safepoint[-1];    \
+        jl_signal_fence();                                              \
+        (void)safepoint_load;                                           \
+    } while (0)
 #ifndef JULIA_ENABLE_THREADING
 extern JL_DLLEXPORT jl_tls_states_t jl_tls_states;
 #define jl_get_ptls_states() (&jl_tls_states)
 #define jl_gc_state() ((int8_t)0)
-#define jl_gc_safepoint()
 STATIC_INLINE int8_t jl_gc_state_set(int8_t state, int8_t old_state)
 {
     (void)state;
@@ -255,17 +366,6 @@ typedef jl_tls_states_t *(*jl_get_ptls_states_func)(void);
 JL_DLLEXPORT void jl_set_ptls_states_getter(jl_get_ptls_states_func f);
 // Make sure jl_gc_state() is always a rvalue
 #define jl_gc_state() ((int8_t)(jl_get_ptls_states()->gc_state))
-JL_DLLEXPORT extern volatile size_t *jl_gc_signal_page;
-STATIC_INLINE void jl_gc_safepoint(void)
-{
-    // This triggers a SegFault when we are in GC
-    // Assign it to a variable to make sure the compiler emit the load
-    // and to avoid Clang warning for -Wunused-volatile-lvalue
-    jl_signal_fence();
-    size_t v = *jl_gc_signal_page;
-    jl_signal_fence();
-    (void)v;
-}
 STATIC_INLINE int8_t jl_gc_state_set(int8_t state, int8_t old_state)
 {
     jl_get_ptls_states()->gc_state = state;
@@ -284,74 +384,111 @@ STATIC_INLINE int8_t jl_gc_state_save_and_set(int8_t state)
 #define jl_gc_unsafe_leave(state) ((void)jl_gc_state_set((state), 0))
 #define jl_gc_safe_enter() jl_gc_state_save_and_set(JL_GC_STATE_SAFE)
 #define jl_gc_safe_leave(state) ((void)jl_gc_state_set((state), JL_GC_STATE_SAFE))
+JL_DLLEXPORT void (jl_gc_safepoint)(void);
+
+#define JL_SIGATOMIC_BEGIN() do {               \
+        jl_get_ptls_states()->defer_signal++;   \
+        jl_signal_fence();                      \
+    } while (0)
+#define JL_SIGATOMIC_END() do {                                 \
+        jl_signal_fence();                                      \
+        if (--jl_get_ptls_states()->defer_signal == 0) {        \
+            jl_sigint_safepoint();                              \
+        }                                                       \
+    } while (0)
+
+// Recursive spin lock
+typedef struct {
+    volatile unsigned long owner;
+    uint32_t count;
+} jl_mutex_t;
+
+JL_DLLEXPORT void jl_gc_enable_finalizers(int on);
+static inline void jl_lock_frame_push(jl_mutex_t *lock);
+static inline void jl_lock_frame_pop(void);
+
+// JL_LOCK and jl_mutex_lock are GC safe points while JL_LOCK_NOGC
+// and jl_mutex_lock_nogc are not.
+// Always use JL_LOCK unless no one holding the lock can trigger a GC or GC
+// safepoint. JL_LOCK_NOGC should only be needed for GC internal locks.
+// The JL_LOCK* and JL_UNLOCK* macros are no-op for non-threading build
+// while the jl_mutex_* functions are always locking and unlocking the locks.
+
+static inline void jl_mutex_wait(jl_mutex_t *lock, int safepoint)
+{
+    unsigned long self = jl_thread_self();
+    unsigned long owner = jl_atomic_load_acquire(&lock->owner);
+    if (owner == self) {
+        lock->count++;
+        return;
+    }
+    while (1) {
+        if (owner == 0 &&
+            jl_atomic_compare_exchange(&lock->owner, 0, self) == 0) {
+            lock->count = 1;
+            return;
+        }
+        if (safepoint)
+            jl_gc_safepoint();
+        jl_cpu_pause();
+        owner = lock->owner;
+    }
+}
+
+static inline void jl_mutex_lock_nogc(jl_mutex_t *lock)
+{
+    jl_mutex_wait(lock, 0);
+}
+
+static inline void jl_mutex_lock(jl_mutex_t *lock)
+{
+    JL_SIGATOMIC_BEGIN();
+    jl_mutex_wait(lock, 1);
+    jl_lock_frame_push(lock);
+    jl_gc_enable_finalizers(0);
+}
+
+static inline void jl_mutex_unlock_nogc(jl_mutex_t *lock)
+{
+    assert(lock->owner == jl_thread_self() &&
+           "Unlocking a lock in a different thread.");
+    if (--lock->count == 0) {
+        jl_atomic_store_release(&lock->owner, 0);
+        jl_cpu_wake();
+    }
+}
+
+static inline void jl_mutex_unlock(jl_mutex_t *lock)
+{
+    jl_mutex_unlock_nogc(lock);
+    jl_gc_enable_finalizers(1);
+    jl_lock_frame_pop();
+    JL_SIGATOMIC_END();
+}
 
 // Locks
 #ifdef JULIA_ENABLE_THREADING
-#define JL_DEFINE_MUTEX(m)                                                \
-    uint64_t volatile m ## _mutex = 0;                                    \
-    int32_t m ## _lock_count = 0;                                         \
-    void jl_unlock_## m ## _func(void)                                    \
-    {                                                                     \
-        JL_UNLOCK_RAW(m);                                                 \
-    }
-
-#define JL_DEFINE_MUTEX_EXT(m)                                            \
-    extern uint64_t volatile m ## _mutex;                                 \
-    extern int32_t m ## _lock_count;                                      \
-    void jl_unlock_## m ## _func(void);
-
-#define JL_LOCK_WAIT(m, wait_ex) do {                                   \
-        if (m ## _mutex == uv_thread_self()) {                          \
-            ++m ## _lock_count;                                         \
-        }                                                               \
-        else {                                                          \
-            for (;;) {                                                  \
-                if (m ## _mutex == 0 &&                                 \
-                    jl_atomic_compare_exchange(&m ## _mutex, 0,         \
-                                               uv_thread_self()) == 0) { \
-                    m ## _lock_count = 1;                               \
-                    break;                                              \
-                }                                                       \
-                wait_ex;                                                \
-                jl_cpu_pause();                                         \
-            }                                                           \
-        }                                                               \
-    } while (0)
-
-#define JL_UNLOCK_RAW(m) do {                                           \
-        if (m ## _mutex == uv_thread_self()) {                          \
-            --m ## _lock_count;                                         \
-            if (m ## _lock_count == 0) {                                \
-                jl_atomic_compare_exchange(&m ## _mutex, uv_thread_self(), 0); \
-                jl_cpu_wake();                                          \
-            }                                                           \
-        }                                                               \
-        else {                                                          \
-            assert(0 && "Unlocking a lock in a different thread.");     \
-        }                                                               \
-    } while (0)
-
-// JL_LOCK is a GC safe point while JL_LOCK_NOGC is not
-// Always use JL_LOCK unless no one holding the lock can trigger a GC or GC
-// safepoint. JL_LOCK_NOGC should only be needed for GC internal locks.
-#define JL_LOCK(m) do {                                 \
-        JL_LOCK_WAIT(m, jl_gc_safepoint());             \
-        jl_lock_frame_push(jl_unlock_## m ## _func);    \
+#define JL_LOCK(m) jl_mutex_lock(m)
+#define JL_UNLOCK(m) jl_mutex_unlock(m)
+#define JL_LOCK_NOGC(m) jl_mutex_lock_nogc(m)
+#define JL_UNLOCK_NOGC(m) jl_mutex_unlock_nogc(m)
+#else // JULIA_ENABLE_THREADING
+static inline void jl_mutex_check_type(jl_mutex_t *m)
+{
+    (void)m;
+}
+#define JL_LOCK(m) do {                         \
+        JL_SIGATOMIC_BEGIN();                   \
+        jl_gc_enable_finalizers(0);             \
+        jl_mutex_check_type(m);                 \
     } while (0)
 #define JL_UNLOCK(m) do {                       \
-        JL_UNLOCK_RAW(m);                       \
-        if (__likely(jl_current_task))          \
-            jl_current_task->locks.len--;       \
+        jl_gc_enable_finalizers(1);             \
+        jl_mutex_check_type(m);                 \
+        JL_SIGATOMIC_END();                     \
     } while (0)
-#define JL_LOCK_NOGC(m) JL_LOCK_WAIT(m, )
-#define JL_UNLOCK_NOGC(m) JL_UNLOCK_RAW(m)
-#else // JULIA_ENABLE_THREADING
-#define JL_DEFINE_MUTEX(m)
-#define JL_DEFINE_MUTEX_EXT(m)
-#define JL_LOCK(m) do {} while (0)
-#define JL_UNLOCK(m) do {} while (0)
-#define JL_LOCK_NOGC(m) do {} while (0)
-#define JL_UNLOCK_NOGC(m) do {} while (0)
+#define JL_LOCK_NOGC(m) jl_mutex_check_type(m)
+#define JL_UNLOCK_NOGC(m) jl_mutex_check_type(m)
 #endif // JULIA_ENABLE_THREADING
 
 #ifdef __cplusplus

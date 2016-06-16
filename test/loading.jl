@@ -4,6 +4,8 @@ using Base.Test
 
 @test @__LINE__ == 5
 
+@test_throws ArgumentError Core.include("test_sourcepath.jl\0")
+
 include("test_sourcepath.jl")
 thefname = "the fname!//\\&\0\1*"
 @test include_string("include_string_test() = @__FILE__", thefname)() == Base.source_path()
@@ -24,4 +26,9 @@ let nfc_name = "\U00F4.jl"
     touch(nfc_name)
     @test Base.isfile_casesensitive(nfc_name)
     rm(nfc_name)
+end
+
+let paddedname = "Ztest_sourcepath.jl"
+    filename = SubString(paddedname, 2, length(paddedname))
+    @test Base.find_in_path(filename) == abspath(paddedname[2:end])
 end

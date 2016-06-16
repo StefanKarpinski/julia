@@ -112,7 +112,7 @@ end
 
 # b^p mod m
 function powermod{T<:Integer}(x::Integer, p::Integer, m::T)
-    p < 0 && throw(DomainError())
+    p < 0 && return powermod(invmod(x, m), -p, m)
     p == 0 && return mod(one(m),m)
     (m == 1 || m == -1) && return zero(m)
     b = oftype(m,mod(x,m))  # this also checks for divide by zero
@@ -184,7 +184,7 @@ function ndigits0z(x::UInt128)
 end
 ndigits0z(x::Integer) = ndigits0z(unsigned(abs(x)))
 
-const ndigits_max_mul = WORD_SIZE==32 ? 69000000 : 290000000000000000
+const ndigits_max_mul = Core.sizeof(Int) == 4 ? 69000000 : 290000000000000000
 
 function ndigits0znb(n::Int, b::Int)
     d = 0
@@ -228,45 +228,47 @@ ndigits(x::Integer) = ndigits(unsigned(abs(x)))
 
 ## integer to string functions ##
 
+string(x::Union{Int8,Int16,Int32,Int64,Int128}) = dec(x)
+
 function bin(x::Unsigned, pad::Int, neg::Bool)
     i = neg + max(pad,sizeof(x)<<3-leading_zeros(x))
-    a = Array(UInt8,i)
+    a = Array{UInt8}(i)
     while i > neg
         a[i] = '0'+(x&0x1)
         x >>= 1
         i -= 1
     end
     if neg; a[1]='-'; end
-    ASCIIString(a)
+    String(a)
 end
 
 function oct(x::Unsigned, pad::Int, neg::Bool)
     i = neg + max(pad,div((sizeof(x)<<3)-leading_zeros(x)+2,3))
-    a = Array(UInt8,i)
+    a = Array{UInt8}(i)
     while i > neg
         a[i] = '0'+(x&0x7)
         x >>= 3
         i -= 1
     end
     if neg; a[1]='-'; end
-    ASCIIString(a)
+    String(a)
 end
 
 function dec(x::Unsigned, pad::Int, neg::Bool)
     i = neg + max(pad,ndigits0z(x))
-    a = Array(UInt8,i)
+    a = Array{UInt8}(i)
     while i > neg
         a[i] = '0'+rem(x,10)
         x = oftype(x,div(x,10))
         i -= 1
     end
     if neg; a[1]='-'; end
-    ASCIIString(a)
+    String(a)
 end
 
 function hex(x::Unsigned, pad::Int, neg::Bool)
     i = neg + max(pad,(sizeof(x)<<1)-(leading_zeros(x)>>2))
-    a = Array(UInt8,i)
+    a = Array{UInt8}(i)
     while i > neg
         d = x & 0xf
         a[i] = '0'+d+39*(d>9)
@@ -274,7 +276,7 @@ function hex(x::Unsigned, pad::Int, neg::Bool)
         i -= 1
     end
     if neg; a[1]='-'; end
-    ASCIIString(a)
+    String(a)
 end
 
 num2hex(n::Integer) = hex(n, sizeof(n)*2)
@@ -286,14 +288,14 @@ function base(b::Int, x::Unsigned, pad::Int, neg::Bool)
     2 <= b <= 62 || throw(ArgumentError("base must be 2 ≤ base ≤ 62, got $b"))
     digits = b <= 36 ? base36digits : base62digits
     i = neg + max(pad,ndigits0z(x,b))
-    a = Array(UInt8,i)
+    a = Array{UInt8}(i)
     while i > neg
         a[i] = digits[1+rem(x,b)]
         x = div(x,b)
         i -= 1
     end
     if neg; a[1]='-'; end
-    ASCIIString(a)
+    String(a)
 end
 base(b::Integer, n::Integer, pad::Integer=1) = base(Int(b), unsigned(abs(n)), pad, n<0)
 
@@ -324,7 +326,7 @@ end
 function digits!{T<:Integer}(a::AbstractArray{T,1}, n::Integer, base::Integer=10)
     2 <= base || throw(ArgumentError("base must be ≥ 2, got $base"))
     base - 1 <= typemax(T) || throw(ArgumentError("type $T too small for base $base"))
-    for i = 1:length(a)
+    for i in eachindex(a)
         a[i] = rem(n, base)
         n = div(n, base)
     end

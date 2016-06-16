@@ -508,7 +508,7 @@ function uv_recvcb(handle::Ptr{Void}, nread::Cssize_t, buf::Ptr{Void}, addr::Ptr
                   ccall(:jl_sockaddr_host6, UInt32, (Ptr{Void}, Ptr{UInt8}), addr, pointer(tmp))
                   IPv6(ntoh(tmp[1]))
               end
-    buf = pointer_to_array(convert(Ptr{UInt8},buf_addr),Int(buf_size),true)
+    buf = unsafe_wrap(Array, convert(Ptr{UInt8},buf_addr),Int(buf_size),true)
     notify(sock.recvnotify,(addrout,buf[1:nread]))
     nothing
 end
@@ -545,6 +545,16 @@ end
 
 ##
 
+type DNSError <: Exception
+    host::AbstractString
+    code::Int32
+end
+
+function show(io::IO, err::DNSError)
+    print(io, "DNSError: ", err.host, ", ", struverror(err.code),
+                                      " (", uverrorname(err.code), ")")
+end
+
 callback_dict = ObjectIdDict()
 
 function uv_getaddrinfocb(req::Ptr{Void}, status::Cint, addrinfo::Ptr{Void})
@@ -553,7 +563,7 @@ function uv_getaddrinfocb(req::Ptr{Void}, status::Cint, addrinfo::Ptr{Void})
     cb = unsafe_pointer_to_objref(data)::Function
     pop!(callback_dict,cb) # using pop forces an error if cb not in callback_dict
     if status != 0 || addrinfo == C_NULL
-        cb(UVError("getaddrinfo callback",status))
+        cb(UVError("uv_getaddrinfocb received an unexpected status code", status))
     else
         freeaddrinfo = addrinfo
         while addrinfo != C_NULL
@@ -562,7 +572,7 @@ function uv_getaddrinfocb(req::Ptr{Void}, status::Cint, addrinfo::Ptr{Void})
                 cb(IPv4(ntoh(ccall(:jl_sockaddr_host4,UInt32,(Ptr{Void},),sockaddr))))
                 break
             #elseif ccall(:jl_sockaddr_is_ip6,Int32,(Ptr{Void},),sockaddr) == 1
-            #    host = Array(UInt128,1)
+            #    host = Array{UInt128}(1)
             #    scope_id = ccall(:jl_sockaddr_host6,UInt32,(Ptr{Void},Ptr{UInt128}),sockaddr,host)
             #    cb(IPv6(ntoh(host[1])))
             #    break
@@ -575,28 +585,47 @@ function uv_getaddrinfocb(req::Ptr{Void}, status::Cint, addrinfo::Ptr{Void})
     nothing
 end
 
-function getaddrinfo(cb::Function, host::ASCIIString)
+function getaddrinfo(cb::Function, host::String)
+    isascii(host) || error("non-ASCII hostname: $host")
     callback_dict[cb] = cb
-    uv_error("getaddrinfo",ccall(:jl_getaddrinfo, Int32, (Ptr{Void}, Cstring, Ptr{UInt8}, Any, Ptr{Void}),
-                                 eventloop(), host, C_NULL, cb, uv_jl_getaddrinfocb::Ptr{Void}))
+    status = ccall(:jl_getaddrinfo, Int32, (Ptr{Void}, Cstring, Ptr{UInt8}, Any, Ptr{Void}),
+                   eventloop(), host, C_NULL, cb, uv_jl_getaddrinfocb::Ptr{Void})
+    if status == UV_EINVAL
+        throw(ArgumentError("Invalid uv_getaddrinfo() agument"))
+    elseif status in [UV_ENOMEM, UV_ENOBUFS]
+        throw(OutOfMemoryError())
+    elseif status < 0
+        throw(UVError("uv_getaddrinfo returned an unexpected error code", status))
+    end
+    return nothing
 end
-getaddrinfo(cb::Function, host::AbstractString) = getaddrinfo(cb,ascii(host))
+getaddrinfo(cb::Function, host::AbstractString) = getaddrinfo(cb, String(host))
 
-function getaddrinfo(host::ASCIIString)
+function getaddrinfo(host::String)
     c = Condition()
     getaddrinfo(host) do IP
         notify(c,IP)
     end
-    ip = wait(c)
-    isa(ip,UVError) && throw(ip)
-    return ip::IPAddr
+    r = wait(c)
+    if isa(r,UVError)
+        if r.code in [UV_EAI_NONAME, UV_EAI_AGAIN, UV_EAI_FAIL, UV_EAI_NODATA]
+            throw(DNSError(host,r.code))
+        elseif r.code == UV_EAI_SYSTEM
+            throw(SystemError("uv_getaddrinfocb"))
+        elseif r.code == UV_EAI_MEMORY
+            throw(OutOfMemoryError())
+        else
+            throw(r)
+        end
+    end
+    return r::IPAddr
 end
-getaddrinfo(host::AbstractString) = getaddrinfo(ascii(host))
+getaddrinfo(host::AbstractString) = getaddrinfo(String(host))
 
 const _sizeof_uv_interface_address = ccall(:jl_uv_sizeof_interface_address,Int32,())
 
 function getipaddr()
-    addr = Array(Ptr{UInt8},1)
+    addr = Array{Ptr{UInt8}}(1)
     addr[1] = C_NULL
     count = zeros(Int32,1)
     lo_present = false
@@ -619,7 +648,7 @@ function getipaddr()
             return rv
         # Uncomment to enbable IPv6
         #elseif ccall(:jl_sockaddr_in_is_ip6,Int32,(Ptr{Void},),sockaddr) == 1
-        #   host = Array(UInt128,1)
+        #   host = Array{UInt128}(1)
         #   ccall(:jl_sockaddr_host6,UInt32,(Ptr{Void},Ptr{UInt128}),sockaddrr,host)
         #   return IPv6(ntoh(host[1]))
         end
@@ -714,8 +743,8 @@ end
 
 ## Utility functions
 
-function listenany(default_port)
-    addr = InetAddr(IPv4(UInt32(0)),default_port)
+function listenany(host::IPAddr, default_port)
+    addr = InetAddr(host, default_port)
     while true
         sock = TCPServer()
         if bind(sock,addr) && _listen(sock) == 0
@@ -728,6 +757,7 @@ function listenany(default_port)
         end
     end
 end
+listenany(default_port) = listenany(IPv4(UInt32(0)),default_port)
 
 function getsockname(sock::Union{TCPServer,TCPSocket})
     rport = Ref{Cushort}(0)
@@ -742,14 +772,14 @@ function getsockname(sock::Union{TCPServer,TCPSocket})
                 (Ptr{Void}, Ref{Cushort}, Ptr{Void}, Ref{Cuint}),
                 sock.handle, rport, raddress, rfamily)
     end
-    uv_error("cannot obtain socket name", r);
+    uv_error("cannot obtain socket name", r)
     if r == 0
         port = ntoh(rport[])
         if rfamily[] == 2 # AF_INET
             addrv4 = raddress[1:4]
             naddr = ntoh(unsafe_load(Ptr{Cuint}(pointer(addrv4)), 1))
             addr = IPv4(naddr)
-        elseif rfamily[] == @windows? 23 : (@osx? 30 : 10) # AF_INET6
+        elseif rfamily[] == @static is_windows() ? 23 : (@static is_apple() ? 30 : 10) # AF_INET6
             naddr = ntoh(unsafe_load(Ptr{UInt128}(pointer(raddress)), 1))
             addr = IPv6(naddr)
         else

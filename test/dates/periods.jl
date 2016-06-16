@@ -9,12 +9,24 @@
 @test Dates.Year(1) + Dates.Year(1) == Dates.Year(2)
 @test Dates.Year(1) - Dates.Year(1) == zero(Dates.Year)
 @test_throws MethodError Dates.Year(1) * Dates.Year(1) == Dates.Year(1)
-@test Dates.Year(10) % Dates.Year(4) == 2
+@test Dates.Year(10) % Dates.Year(4) == Dates.Year(2)
 @test gcd(Dates.Year(10), Dates.Year(4)) == Dates.Year(2)
 @test lcm(Dates.Year(10), Dates.Year(4)) == Dates.Year(20)
 @test div(Dates.Year(10),Dates.Year(3)) == 3
 @test div(Dates.Year(10),Dates.Year(4)) == 2
+@test div(Dates.Year(10),4) == Dates.Year(2)
 @test Dates.Year(10) / Dates.Year(4) == 2.5
+
+@test mod(Dates.Year(10),Dates.Year(4)) == Dates.Year(2)
+@test mod(Dates.Year(-10),Dates.Year(4)) == Dates.Year(2)
+@test mod(Dates.Year(10),4) == Dates.Year(2)
+@test mod(Dates.Year(-10),4) == Dates.Year(2)
+
+@test rem(Dates.Year(10),Dates.Year(4)) == Dates.Year(2)
+@test rem(Dates.Year(-10),Dates.Year(4)) == Dates.Year(-2)
+@test rem(Dates.Year(10),4) == Dates.Year(2)
+@test rem(Dates.Year(-10),4) == Dates.Year(-2)
+
 t = Dates.Year(1)
 t2 = Dates.Year(2)
 @test ([t,t,t,t,t] + Dates.Year(1)) == ([t2,t2,t2,t2,t2])
@@ -22,9 +34,9 @@ t2 = Dates.Year(2)
 @test ([t2,t2,t2,t2,t2] - Dates.Year(1)) == ([t,t,t,t,t])
 @test_throws MethodError ([t,t,t,t,t] .* Dates.Year(1)) == ([t,t,t,t,t])
 @test ([t,t,t,t,t] * 1) == ([t,t,t,t,t])
-@test ([t,t,t,t,t] .% t2) == ([1,1,1,1,1])
+@test ([t,t,t,t,t] .% t2) == ([t,t,t,t,t])
 @test div([t,t,t,t,t],Dates.Year(1)) == ([1,1,1,1,1])
-@test mod([t,t,t,t,t],Dates.Year(2)) == ([1,1,1,1,1])
+@test mod([t,t,t,t,t],Dates.Year(2)) == ([t,t,t,t,t])
 @test [t,t,t] / t2 == [0.5,0.5,0.5]
 @test abs(-t) == t
 
@@ -143,6 +155,7 @@ y2 = Dates.Year(2)
 @test typemax(Dates.Year) == Dates.Year(typemax(Int64))
 @test typemax(Dates.Year) + y == Dates.Year(-9223372036854775808)
 @test typemin(Dates.Year) == Dates.Year(-9223372036854775808)
+
 #Period-Real arithmetic
 @test_throws MethodError y + 1 == Dates.Year(2)
 @test_throws MethodError y + true == Dates.Year(2)
@@ -154,14 +167,20 @@ y2 = Dates.Year(2)
 @test div(y,2) == Dates.Year(0)
 @test_throws MethodError div(2,y) == Dates.Year(2)
 @test div(y,y) == 1
-@test y*10 % 5 == Dates.Year(0)
+@test y*10 % Dates.Year(5) == Dates.Year(0)
 @test_throws MethodError (y > 3) == false
 @test_throws MethodError (4 < y) == false
 @test 1 != y
 t = [y,y,y,y,y]
 @test t .+ Dates.Year(2) == [Dates.Year(3),Dates.Year(3),Dates.Year(3),Dates.Year(3),Dates.Year(3)]
-dt = Dates.DateTime(2012,12,21)
+
+let x = Dates.Year(5), y = Dates.Year(2)
+    @test div(x,y)*y + rem(x,y) == x
+    @test fld(x,y)*y + mod(x,y) == x
+end
+
 # Associativity
+dt = Dates.DateTime(2012,12,21)
 test = ((((((((dt + y) - m) + w) - d) + h) - mi) + s) - ms)
 @test test == dt + y - m + w - d + h - mi + s - ms
 @test test == y - m + w - d + dt + h - mi + s - ms
@@ -293,6 +312,15 @@ emptyperiod = ((y + d) - d) - y
 @test 8d - s == 1w + 23h + 59mi + 59s
 @test h + 3mi == 63mi
 @test y - m == 11m
+
+# reduce compound periods into the most basic form
+@test (h - mi).periods == Dates.Period[59mi]
+@test (-h + mi).periods == Dates.Period[-59mi]
+@test (-y + d).periods == Dates.Period[-y, d]
+@test (-y + m - w + d).periods == Dates.Period[-11m, -6d]
+@test (-y + m - w + ms).periods == Dates.Period[-11m, -6d, -23h, -59mi, -59s, -999ms]
+@test (y - m + w - d + h - mi + s - ms).periods == Dates.Period[11m, 6d, 59mi, 999ms]
+@test (-y + m - w + d - h + mi - s + ms).periods == Dates.Period[-11m, -6d, -59mi, -999ms]
 
 @test Date(2009,2,1) - (Month(1) + Day(1)) == Date(2008,12,31)
 @test (Month(1) + Day(1)) - Date(2009,2,1) == Date(2008,12,31)

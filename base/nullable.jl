@@ -9,6 +9,7 @@ Nullable() = Nullable{Union{}}()
 eltype{T}(::Type{Nullable{T}}) = T
 
 convert{T}(::Type{Nullable{T}}, x::Nullable{T}) = x
+convert(   ::Type{Nullable   }, x::Nullable   ) = x
 
 convert{T}(t::Type{Nullable{T}}, x::Any) = convert(t, convert(T, x))
 
@@ -17,16 +18,31 @@ function convert{T}(::Type{Nullable{T}}, x::Nullable)
 end
 
 convert{T}(::Type{Nullable{T}}, x::T) = Nullable{T}(x)
+convert{T}(::Type{Nullable   }, x::T) = Nullable{T}(x)
 
 convert{T}(::Type{Nullable{T}}, ::Void) = Nullable{T}()
 convert(   ::Type{Nullable   }, ::Void) = Nullable{Union{}}()
 
+promote_rule{S,T}(::Type{Nullable{S}}, ::Type{T}) = Nullable{promote_type(S, T)}
+promote_rule{S,T}(::Type{Nullable{S}}, ::Type{Nullable{T}}) = Nullable{promote_type(S, T)}
+promote_op{S,T}(op::Any, ::Type{Nullable{S}}, ::Type{Nullable{T}}) = Nullable{promote_op(op, S, T)}
+
 function show{T}(io::IO, x::Nullable{T})
-    print(io, "Nullable{", T, "}(")
-    if !isnull(x)
-        show(io, x.value)
+    if get(io, :compact, false)
+        if isnull(x)
+            print(io, "#NULL")
+        else
+            show(io, x.value)
+        end
+    else
+        print(io, "Nullable{")
+        showcompact(io, eltype(x))
+        print(io, "}(")
+        if !isnull(x)
+            showcompact(io, x.value)
+        end
+        print(io, ')')
     end
-    print(io, ')')
 end
 
 get(x::Nullable) = x.isnull ? throw(NullException()) : x.value

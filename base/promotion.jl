@@ -32,38 +32,40 @@ function typejoin(a::ANY, b::ANY)
             return Any
         end
         ap, bp = a.parameters, b.parameters
-        la = length(ap)::Int; lb = length(bp)::Int
-        if la==0 || lb==0
+        lar = length(ap)::Int; lbr = length(bp)::Int
+        laf, afixed = full_va_len(ap)
+        lbf, bfixed = full_va_len(bp)
+        if lar==0 || lbr==0
             return Tuple
         end
-        if la < lb
-            if isvarargtype(ap[la])
-                c = cell(la)
-                c[la] = Vararg{typejoin(ap[la].parameters[1], tailjoin(bp,la))}
-                n = la-1
+        if laf < lbf
+            if isvarargtype(ap[lar]) && !afixed
+                c = Vector{Any}(laf)
+                c[laf] = Vararg{typejoin(ap[lar].parameters[1], tailjoin(bp,laf))}
+                n = laf-1
             else
-                c = cell(la+1)
-                c[la+1] = Vararg{tailjoin(bp,la+1)}
-                n = la
+                c = Vector{Any}(laf+1)
+                c[laf+1] = Vararg{tailjoin(bp,laf+1)}
+                n = laf
             end
-        elseif lb < la
-            if isvarargtype(bp[lb])
-                c = cell(lb)
-                c[lb] = Vararg{typejoin(bp[lb].parameters[1], tailjoin(ap,lb))}
-                n = lb-1
+        elseif lbf < laf
+            if isvarargtype(bp[lbr]) && !bfixed
+                c = Vector{Any}(lbf)
+                c[lbf] = Vararg{typejoin(bp[lbr].parameters[1], tailjoin(ap,lbf))}
+                n = lbf-1
             else
-                c = cell(lb+1)
-                c[lb+1] = Vararg{tailjoin(ap,lb+1)}
-                n = lb
+                c = Vector{Any}(lbf+1)
+                c[lbf+1] = Vararg{tailjoin(ap,lbf+1)}
+                n = lbf
             end
         else
-            c = cell(la)
-            n = la
+            c = Vector{Any}(laf)
+            n = laf
         end
         for i = 1:n
-            ai = ap[i]; bi = bp[i]
+            ai = ap[min(i,lar)]; bi = bp[min(i,lbr)]
             ci = typejoin(unwrapva(ai),unwrapva(bi))
-            c[i] = isvarargtype(ai) || isvarargtype(bi) ? Vararg{ci} : ci
+            c[i] = i == length(c) && (isvarargtype(ai) || isvarargtype(bi)) ? Vararg{ci} : ci
         end
         return Tuple{c...}
     elseif b <: Tuple
@@ -76,7 +78,7 @@ function typejoin(a::ANY, b::ANY)
             end
             # join on parameters
             n = length(a.parameters)
-            p = cell(n)
+            p = Vector{Any}(n)
             for i = 1:n
                 ai, bi = a.parameters[i], b.parameters[i]
                 if ai === bi || (isa(ai,Type) && isa(bi,Type) && typeseq(ai,bi))
@@ -92,8 +94,24 @@ function typejoin(a::ANY, b::ANY)
     return Any
 end
 
+# Returns length, isfixed
+function full_va_len(p)
+    isempty(p) && return 0, true
+    if isvarargtype(p[end])
+        N = p[end].parameters[2]
+        if isa(N, Integer)
+            return (length(p) + N - 1)::Int, true
+        end
+        return length(p)::Int, false
+    end
+    return length(p)::Int, true
+end
+
 # reduce typejoin over A[i:end]
 function tailjoin(A, i)
+    if i > length(A)
+        return unwrapva(A[end])
+    end
     t = Bottom
     for j = i:length(A)
         t = typejoin(t, unwrapva(A[j]))
@@ -193,19 +211,19 @@ rem(x::Real, y::Real) = rem(promote(x,y)...)
 mod(x::Real, y::Real) = mod(promote(x,y)...)
 
 mod1(x::Real, y::Real) = mod1(promote(x,y)...)
-rem1(x::Real, y::Real) = rem1(promote(x,y)...)
 fld1(x::Real, y::Real) = fld1(promote(x,y)...)
 
 max(x::Real, y::Real) = max(promote(x,y)...)
 min(x::Real, y::Real) = min(promote(x,y)...)
 minmax(x::Real, y::Real) = minmax(promote(x, y)...)
 
-# "Promotion" that takes a Functor into account. You can override this
+# "Promotion" that takes a function into account. You can override this
 # as needed. For example, if you need to provide a custom result type
 # for the multiplication of two types,
-#   promote_op{R<:MyType,S<:MyType}(::MulFun, ::Type{R}, ::Type{S}) = MyType{multype(R,S)}
+#   promote_op{R<:MyType,S<:MyType}(::typeof(*), ::Type{R}, ::Type{S}) = MyType{multype(R,S)}
 promote_op(::Any)    = (@_pure_meta; Bottom)
 promote_op(::Any, T) = (@_pure_meta; T)
+promote_op{T}(::Type{T}, ::Any) = (@_pure_meta; T)
 promote_op{R,S}(::Any, ::Type{R}, ::Type{S}) = (@_pure_meta; promote_type(R, S))
 promote_op(op, T, S, U, V...) = (@_pure_meta; promote_op(op, T, promote_op(op, S, U, V...)))
 

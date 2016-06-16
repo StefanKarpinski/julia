@@ -38,6 +38,7 @@ const skipfiles = [
     "../base/linalg/givens.jl",
     #
     "../src/abi_llvm.cpp",
+    "../src/abi_ppc64le.cpp",
     "../src/abi_win32.cpp",
     "../src/abi_win64.cpp",
     "../src/abi_x86.cpp",
@@ -49,6 +50,7 @@ const skipfiles = [
     "../src/support/MurmurHash3.c",
     "../src/support/MurmurHash3.h",
     "../src/support/asprintf.c",
+    "../src/support/dirname.c",
     "../src/support/strptime.c",
     "../src/support/strtod.c",
     "../src/support/tzfile.h",
@@ -71,8 +73,9 @@ const old_license = ""
 ### END CONFIG HERE
 
 
-function check_lines!(path::AbstractString, lines::Vector, checktxt::AbstractString,
-                                                 prefix::ASCIIString, oldcheck::Bool)
+function check_lines!(
+    path::AbstractString, lines::Vector, checktxt::AbstractString,
+    prefix::AbstractString, oldcheck::Bool)
     remove = []
     for i in 1:length(lines)
         line = lines[i]

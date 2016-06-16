@@ -34,7 +34,6 @@ function test_code_reflections(tester, freflect)
     test_code_reflection(freflect, muladd, Tuple{Float64, Float64, Float64}, tester)
 end
 
-println(STDERR, "The following 'Returned code...' warnings indicate normal behavior:")
 test_code_reflections(test_ast_reflection, code_lowered)
 test_code_reflections(test_ast_reflection, code_typed)
 test_code_reflections(test_bin_reflection, code_llvm)
@@ -80,11 +79,32 @@ show(iob, expand(:(x->x^2)))
 str = takebuf_string(iob)
 @test isempty(search(str, tag))
 
-# issue #13568
+module ImportIntrinsics15819
+# Make sure changing the lookup path of an intrinsic doesn't break
+# the heuristic for type instability warning.
+# This can be any intrinsic that needs boxing
+import Core.Intrinsics: sqrt_llvm, box, unbox
+# Use import
+sqrt15819(x::Float64) = box(Float64, sqrt_llvm(unbox(Float64, x)))
+# Use fully qualified name
+sqrt15819(x::Float32) = box(Float32, Core.Intrinsics.sqrt_llvm(unbox(Float32, x)))
+end
+foo11122(x) = @fastmath x - 1.0
+
+# issue #11122, #13568 and #15819
 @test !warntype_hastag(+, Tuple{Int,Int}, tag)
 @test !warntype_hastag(-, Tuple{Int,Int}, tag)
 @test !warntype_hastag(*, Tuple{Int,Int}, tag)
 @test !warntype_hastag(/, Tuple{Int,Int}, tag)
+@test !warntype_hastag(foo11122, Tuple{Float32}, tag)
+@test !warntype_hastag(foo11122, Tuple{Float64}, tag)
+@test !warntype_hastag(foo11122, Tuple{Int}, tag)
+@test !warntype_hastag(sqrt, Tuple{Int}, tag)
+@test !warntype_hastag(sqrt, Tuple{Float64}, tag)
+@test !warntype_hastag(^, Tuple{Float64,Int32}, tag)
+@test !warntype_hastag(^, Tuple{Float32,Int32}, tag)
+@test !warntype_hastag(ImportIntrinsics15819.sqrt15819, Tuple{Float64}, tag)
+@test !warntype_hastag(ImportIntrinsics15819.sqrt15819, Tuple{Float32}, tag)
 
 end
 
@@ -94,6 +114,18 @@ end
 @test isbits(Float32)
 @test isbits(Int)
 @test !isbits(AbstractString)
+@test isbits(Tuple{Int, Vararg{Int, 2}})
+@test !isbits(Tuple{Int, Vararg{Int}})
+@test !isbits(Tuple{Integer, Vararg{Int, 2}})
+@test isbits(Tuple{Int, Vararg{Any, 0}})
+@test isbits(Tuple{Vararg{Any, 0}})
+
+# issue #16670
+@test isleaftype(Tuple{Int, Vararg{Int, 2}})
+@test !isleaftype(Tuple{Integer, Vararg{Int, 2}})
+@test !isleaftype(Tuple{Int, Vararg{Int}})
+@test isleaftype(Type{Tuple{Integer, Vararg{Int}}})
+@test isleaftype(Type{Vector})
 
 # issue #10165
 i10165(::DataType) = 0
@@ -170,7 +202,7 @@ let
     @test Base.function_name(foo7648)==:foo7648
     @test Base.function_module(foo7648, (Any,))==TestMod7648
     @test basename(functionloc(foo7648, (Any,))[1]) == "reflection.jl"
-    @test methods(TestMod7648.TestModSub9475.foo7648).defs==@which foo7648(5)
+    @test first(methods(TestMod7648.TestModSub9475.foo7648)) == @which foo7648(5)
     @test TestMod7648==@which foo7648
     @test TestMod7648.TestModSub9475==@which a9475
 end
@@ -205,11 +237,15 @@ let t13464 = "hey there sailor"
     end
 end
 
+# PR 13825
 let ex = :(a + b)
     @test string(ex) == "a + b"
     ex.typ = Integer
     @test string(ex) == "(a + b)::Integer"
 end
+foo13825{T,N}(::Array{T,N}, ::Array, ::Vector) = nothing
+@test startswith(string(first(methods(foo13825))),
+                 "foo13825{T,N}(::Array{T,N}, ::Array, ::Array{T<:Any,1})")
 
 type TLayout
     x::Int8
@@ -226,6 +262,10 @@ tlayout = TLayout(5,7,11)
 @test_throws BoundsError fieldtype(TLayout, 4)
 @test_throws BoundsError fieldname(TLayout, 4)
 @test_throws BoundsError fieldoffset(TLayout, 4)
+
+@test fieldnames((1,2,3)) == fieldnames(NTuple{3, Int}) == [fieldname(NTuple{3, Int}, i) for i = 1:3] == [1, 2, 3]
+@test_throws BoundsError fieldname(NTuple{3, Int}, 0)
+@test_throws BoundsError fieldname(NTuple{3, Int}, 4)
 
 import Base: isstructtype, type_alignment, return_types
 @test !isstructtype(Union{})
@@ -249,3 +289,212 @@ end
     end
 end
 @test functionloc(f15447)[2] > 0
+
+# issue #14346
+@noinline function f14346(id, mask, limit)
+    if id <= limit && mask[id]
+        return true
+    end
+end
+@test functionloc(f14346)[2] == @__LINE__-4
+
+# test jl_get_llvm_fptr. We test functions both in and definitely not in the system image
+definitely_not_in_sysimg() = nothing
+for (f,t) in ((definitely_not_in_sysimg,Tuple{}),
+        (Base.throw_boundserror,Tuple{UnitRange{Int64},Int64}))
+    t = Base.tt_cons(Core.Typeof(f), Base.to_tuple_type(t))
+    llvmf = ccall(:jl_get_llvmf, Ptr{Void}, (Any, Bool, Bool), t, false, true)
+    @test llvmf != C_NULL
+    @test ccall(:jl_get_llvm_fptr, Ptr{Void}, (Ptr{Void},), llvmf) != C_NULL
+end
+
+module MacroTest
+export @macrotest
+macro macrotest(x::Int, y::Symbol) end
+macro macrotest(x::Int, y::Int)
+    nothing #This is here because of #15280
+end
+end
+
+let
+    using MacroTest
+    a = 1
+    m = getfield(current_module(), Symbol("@macrotest"))
+    @test which(m, Tuple{Int,Symbol})==@which @macrotest 1 a
+    @test which(m, Tuple{Int,Int})==@which @macrotest 1 1
+
+    @test first(methods(m,Tuple{Int, Int}))==@which MacroTest.@macrotest 1 1
+    @test functionloc(@which @macrotest 1 1) == @functionloc @macrotest 1 1
+end
+
+# issue #15714
+# show variable names for slots and suppress spurious type warnings
+function f15714(array_var15714)
+    for index_var15714 in eachindex(array_var15714)
+        array_var15714[index_var15714] += 0
+    end
+end
+
+function g15714(array_var15714)
+    for index_var15714 in eachindex(array_var15714)
+        array_var15714[index_var15714] += 0
+    end
+    for index_var15714 in eachindex(array_var15714)
+        array_var15714[index_var15714] += 0
+    end
+end
+
+used_dup_var_tested15714 = false
+used_unique_var_tested15714 = false
+function test_typed_ast_printing(f::ANY, types::ANY, must_used_vars)
+    li = code_typed(f, types)[1]
+    dupnames = Set()
+    slotnames = Set()
+    for name in li.slotnames
+        if name in slotnames
+            push!(dupnames, name)
+        else
+            push!(slotnames, name)
+        end
+    end
+    # Make sure must_used_vars are in slotnames
+    for name in must_used_vars
+        @test name in slotnames
+    end
+    for str in (sprint(io->code_warntype(io, f, types)),
+                sprint(io->show(io, li)))
+        # Test to make sure the clearing of file path below works
+        # If we don't store the full path in line number node/ast printing
+        # anymore, the test and the string replace below should be fixed.
+        @test contains(str, @__FILE__)
+        str = replace(str, @__FILE__, "")
+        for var in must_used_vars
+            @test contains(str, string(var))
+        end
+        @test !contains(str, "Any")
+        @test !contains(str, "ANY")
+        # Check that we are not printing the bare slot numbers
+        for i in 1:length(li.slotnames)
+            name = li.slotnames[i]
+            if name in dupnames
+                @test contains(str, "_$i")
+                if name in must_used_vars
+                    global used_dup_var_tested15714 = true
+                end
+            else
+                @test !contains(str, "_$i")
+                if name in must_used_vars
+                    global used_unique_var_tested15714 = true
+                end
+            end
+        end
+    end
+    # Make sure printing an AST outside LambdaInfo still works.
+    str = sprint(io->show(io, Base.uncompressed_ast(li)))
+    # Check that we are printing the slot numbers when we don't have the context
+    # Use the variable names that we know should be present in the optimized AST
+    for i in 2:length(li.slotnames)
+        name = li.slotnames[i]
+        if name in must_used_vars
+            @test contains(str, "_$i")
+        end
+    end
+end
+test_typed_ast_printing(f15714, Tuple{Vector{Float32}},
+                        [:array_var15714, :index_var15714])
+test_typed_ast_printing(g15714, Tuple{Vector{Float32}},
+                        [:array_var15714, :index_var15714])
+@test used_dup_var_tested15714
+@test used_unique_var_tested15714
+
+# Linfo Tracing test
+tracefoo(x, y) = x+y
+didtrace = false
+tracer(x::Ptr{Void}) = (@test isa(unsafe_pointer_to_objref(x), LambdaInfo); global didtrace = true; nothing)
+ccall(:jl_register_method_tracer, Void, (Ptr{Void},), cfunction(tracer, Void, (Ptr{Void},)))
+meth = which(tracefoo,Tuple{Any,Any})
+ccall(:jl_trace_method, Void, (Any,), meth)
+@test tracefoo(1, 2) == 3
+ccall(:jl_untrace_method, Void, (Any,), meth)
+@test didtrace
+didtrace = false
+@test tracefoo(1.0, 2.0) == 3.0
+@test !didtrace
+ccall(:jl_register_method_tracer, Void, (Ptr{Void},), C_NULL)
+
+# Method Tracing test
+methtracer(x::Ptr{Void}) = (@test isa(unsafe_pointer_to_objref(x), Method); global didtrace = true; nothing)
+ccall(:jl_register_newmeth_tracer, Void, (Ptr{Void},), cfunction(methtracer, Void, (Ptr{Void},)))
+tracefoo2(x, y) = x*y
+@test didtrace
+didtrace = false
+tracefoo(x::Int64, y::Int64) = x*y
+@test didtrace
+didtrace = false
+ccall(:jl_register_newmeth_tracer, Void, (Ptr{Void},), C_NULL)
+
+# test for reflection over large method tables
+for i = 1:100; @eval fLargeTable(::Val{$i}, ::Any) = 1; end
+for i = 1:100; @eval fLargeTable(::Any, ::Val{$i}) = 2; end
+fLargeTable(::Any...) = 3
+fLargeTable(::Complex, ::Complex) = 4
+fLargeTable(::Union{Complex64, Complex128}...) = 5
+fLargeTable() = 4
+@test length(methods(fLargeTable)) == 204
+@test length(methods(fLargeTable, Tuple{})) == 1
+@test fLargeTable(1im, 2im) == 4
+@test fLargeTable(1.0im, 2.0im) == 5
+@test_throws MethodError fLargeTable(Val{1}(), Val{1}())
+@test fLargeTable(Val{1}(), 1) == 1
+@test fLargeTable(1, Val{1}()) == 2
+
+# issue #15280
+function f15280(x) end
+@test functionloc(f15280)[2] > 0
+
+# bug found in #16850, Base.url with backslashes on Windows
+function module_depth(from::Module, to::Module)
+    if from === to
+        return 0
+    else
+        return 1 + module_depth(from, module_parent(to))
+    end
+end
+function has_backslashes(mod::Module)
+    for n in names(mod, true, true)
+        isdefined(mod, n) || continue
+        f = getfield(mod, n)
+        if isa(f, Module) && module_depth(Main, f) <= module_depth(Main, mod)
+            continue
+        end
+        h = has_backslashes(f)
+        isnull(h) || return h
+    end
+    return Nullable{Method}()
+end
+function has_backslashes(f::Function)
+    for m in methods(f)
+        h = has_backslashes(m)
+        isnull(h) || return h
+    end
+    return Nullable{Method}()
+end
+function has_backslashes(meth::Method)
+    if '\\' in string(meth.file)
+        return Nullable{Method}(meth)
+    else
+        return Nullable{Method}()
+    end
+end
+has_backslashes(x) = Nullable{Method}()
+h16850 = has_backslashes(Base)
+if is_windows()
+    if isnull(h16850)
+        warn("No methods found in Base with backslashes in file name, ",
+             "skipping test for Base.url")
+    else
+        @test !('\\' in Base.url(get(h16850)))
+    end
+else
+    @test isnull(h16850)
+end

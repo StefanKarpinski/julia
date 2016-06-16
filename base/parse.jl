@@ -54,7 +54,7 @@ function parseint_preamble(signed::Bool, base::Int, s::AbstractString, startpos:
     return sgn, base, j
 end
 
-function tryparse_internal{S<:ByteString}(::Type{Bool}, sbuff::S, startpos::Int, endpos::Int, raise::Bool)
+function tryparse_internal(::Type{Bool}, sbuff::String, startpos::Int, endpos::Int, raise::Bool)
     len = endpos-startpos+1
     p = pointer(sbuff)+startpos-1
     (len == 4) && (0 == ccall(:memcmp, Int32, (Ptr{UInt8}, Ptr{UInt8}, UInt), p, "true", 4)) && (return Nullable(true))
@@ -145,19 +145,15 @@ function parse{T<:Integer}(::Type{T}, s::AbstractString, base::Integer)
 end
 parse{T<:Integer}(::Type{T}, s::AbstractString) = get(tryparse_internal(T, s, 0, true))
 
-## stringifying integers more efficiently ##
-
-string(x::Union{Int8,Int16,Int32,Int64,Int128}) = dec(x)
-
 ## string to float functions ##
 
-tryparse(::Type{Float64}, s::ByteString) = ccall(:jl_try_substrtod, Nullable{Float64}, (Ptr{UInt8},Csize_t,Csize_t), s, 0, sizeof(s))
-tryparse{T<:ByteString}(::Type{Float64}, s::SubString{T}) = ccall(:jl_try_substrtod, Nullable{Float64}, (Ptr{UInt8},Csize_t,Csize_t), s.string, s.offset, s.endof)
+tryparse(::Type{Float64}, s::String) = ccall(:jl_try_substrtod, Nullable{Float64}, (Ptr{UInt8},Csize_t,Csize_t), s, 0, sizeof(s))
+tryparse(::Type{Float64}, s::SubString{String}) = ccall(:jl_try_substrtod, Nullable{Float64}, (Ptr{UInt8},Csize_t,Csize_t), s.string, s.offset, s.endof)
 
-tryparse(::Type{Float32}, s::ByteString) = ccall(:jl_try_substrtof, Nullable{Float32}, (Ptr{UInt8},Csize_t,Csize_t), s, 0, sizeof(s))
-tryparse{T<:ByteString}(::Type{Float32}, s::SubString{T}) = ccall(:jl_try_substrtof, Nullable{Float32}, (Ptr{UInt8},Csize_t,Csize_t), s.string, s.offset, s.endof)
+tryparse(::Type{Float32}, s::String) = ccall(:jl_try_substrtof, Nullable{Float32}, (Ptr{UInt8},Csize_t,Csize_t), s, 0, sizeof(s))
+tryparse(::Type{Float32}, s::SubString{String}) = ccall(:jl_try_substrtof, Nullable{Float32}, (Ptr{UInt8},Csize_t,Csize_t), s.string, s.offset, s.endof)
 
-tryparse{T<:Union{Float32,Float64}}(::Type{T}, s::AbstractString) = tryparse(T, bytestring(s))
+tryparse{T<:Union{Float32,Float64}}(::Type{T}, s::AbstractString) = tryparse(T, String(s))
 
 function parse{T<:AbstractFloat}(::Type{T}, s::AbstractString)
     nf = tryparse(T, s)
@@ -173,18 +169,18 @@ float{S<:AbstractString}(a::AbstractArray{S}) = map!(float, similar(a,typeof(flo
 function parse(str::AbstractString, pos::Int; greedy::Bool=true, raise::Bool=true)
     # pos is one based byte offset.
     # returns (expr, end_pos). expr is () in case of parse error.
-    bstr = bytestring(str)
+    bstr = String(str)
     ex, pos = ccall(:jl_parse_string, Any,
                     (Ptr{UInt8}, Csize_t, Int32, Int32),
                     bstr, sizeof(bstr), pos-1, greedy ? 1:0)
     if raise && isa(ex,Expr) && is(ex.head,:error)
         throw(ParseError(ex.args[1]))
     end
-    if ex == ()
+    if ex === ()
         raise && throw(ParseError("end of input"))
         ex = Expr(:error, "end of input")
     end
-    ex, pos+1 # C is zero-based, Julia is 1-based
+    return ex, pos+1 # C is zero-based, Julia is 1-based
 end
 
 function parse(str::AbstractString; raise::Bool=true)

@@ -22,7 +22,7 @@ import
 
 import Base.Rounding: rounding_raw, setrounding_raw
 
-import Base.GMP: ClongMax, CulongMax, CdoubleMax
+import Base.GMP: ClongMax, CulongMax, CdoubleMax, Limb
 
 import Base.Math.lgamma_r
 
@@ -46,7 +46,7 @@ type BigFloat <: AbstractFloat
     prec::Clong
     sign::Cint
     exp::Clong
-    d::Ptr{Culong}
+    d::Ptr{Limb}
     function BigFloat()
         N = precision(BigFloat)
         z = new(zero(Clong), zero(Cint), zero(Clong), C_NULL)
@@ -177,13 +177,13 @@ convert(::Type{Float32}, x::BigFloat) =
 # TODO: avoid double rounding
 convert(::Type{Float16}, x::BigFloat) = convert(Float16, convert(Float32, x))
 
-call(::Type{Float64}, x::BigFloat, r::RoundingMode) =
+(::Type{Float64})(x::BigFloat, r::RoundingMode) =
     ccall((:mpfr_get_d,:libmpfr), Float64, (Ptr{BigFloat},Int32), &x, to_mpfr(r))
-call(::Type{Float32}, x::BigFloat, r::RoundingMode) =
+(::Type{Float32})(x::BigFloat, r::RoundingMode) =
     ccall((:mpfr_get_flt,:libmpfr), Float32, (Ptr{BigFloat},Int32), &x, to_mpfr(r))
 # TODO: avoid double rounding
-call(::Type{Float16}, x::BigFloat, r::RoundingMode) =
-    convert(Float16, call(Float32, x, r))
+(::Type{Float16})(x::BigFloat, r::RoundingMode) =
+    convert(Float16, Float32(x, r))
 
 promote_rule{T<:Real}(::Type{BigFloat}, ::Type{T}) = BigFloat
 promote_rule{T<:AbstractFloat}(::Type{BigInt},::Type{T}) = BigFloat
@@ -368,7 +368,6 @@ function div(x::BigFloat, c::BigInt)
 end
 
 
-
 # More efficient commutative operations
 for (fJ, fC, fI) in ((:+, :add, 0), (:*, :mul, 1))
     @eval begin
@@ -437,6 +436,9 @@ function ^(x::BigFloat, y::BigInt)
     ccall((:mpfr_pow_z, :libmpfr), Int32, (Ptr{BigFloat}, Ptr{BigFloat}, Ptr{BigInt}, Int32), &z, &x, &y, ROUNDING_MODE[end])
     return z
 end
+
+^(x::BigFloat, y::Integer)  = typemin(Clong)  <= y <= typemax(Clong)  ? x^Clong(y)  : x^BigInt(y)
+^(x::BigFloat, y::Unsigned) = typemin(Culong) <= y <= typemax(Culong) ? x^Culong(y) : x^BigInt(y)
 
 for f in (:exp, :exp2, :exp10, :expm1, :digamma, :erf, :erfc, :zeta,
           :cosh,:sinh,:tanh,:sech,:csch,:coth, :cbrt)
@@ -619,7 +621,7 @@ for f in (:sin,:cos,:tan,:sec,:csc,
 end
 
 # log of absolute value of gamma function
-const lgamma_signp = Array(Cint, 1)
+const lgamma_signp = Array{Cint}(1)
 function lgamma(x::BigFloat)
     z = BigFloat()
     ccall((:mpfr_lgamma,:libmpfr), Cint, (Ptr{BigFloat}, Ptr{Cint}, Ptr{BigFloat}, Int32), &z, lgamma_signp, &x, ROUNDING_MODE[end])
@@ -850,16 +852,17 @@ function string(x::BigFloat)
     # is, excluding the most significant, ceil(log(10, 2^precision(x)))
     k = ceil(Int32, precision(x) * 0.3010299956639812)
     lng = k + Int32(8) # Add space for the sign, the most significand digit, the dot and the exponent
-    buf = Array(UInt8, lng + 1)
+    buf = Array{UInt8}(lng + 1)
     # format strings are guaranteed to contain no NUL, so we don't use Cstring
     lng = ccall((:mpfr_snprintf,:libmpfr), Int32, (Ptr{UInt8}, Culong, Ptr{UInt8}, Ptr{BigFloat}...), buf, lng + 1, "%.Re", &x)
     if lng < k + 5 # print at least k decimal places
         lng = ccall((:mpfr_sprintf,:libmpfr), Int32, (Ptr{UInt8}, Ptr{UInt8}, Ptr{BigFloat}...), buf, "%.$(k)Re", &x)
     elseif lng > k + 8
-        buf = Array(UInt8, lng + 1)
+        buf = Array{UInt8}(lng + 1)
         lng = ccall((:mpfr_snprintf,:libmpfr), Int32, (Ptr{UInt8}, Culong, Ptr{UInt8}, Ptr{BigFloat}...), buf, lng + 1, "%.Re", &x)
     end
-    return bytestring(pointer(buf), (1 <= x < 10 || -10 < x <= -1 || x == 0) ? lng - 4 : lng)
+    n = (1 <= x < 10 || -10 < x <= -1 || x == 0) ? lng - 4 : lng
+    return String(buf[1:n])
 end
 
 print(io::IO, b::BigFloat) = print(io, string(b))

@@ -30,14 +30,24 @@ end
 
 @trigger '`' ->
 function inline_code(stream::IO, md::MD)
-    result = parse_inline_wrapper(stream, "`"; rep=true)
-    return result === nothing ? nothing : Code(result)
-end
-
-@trigger '`' ->
-function inline_tex(stream::IO, md::MD)
-    result = parse_inline_wrapper(stream, "``"; rep=true)
-    return result === nothing ? nothing : LaTeX(result)
+    withstream(stream) do
+        ticks = startswith(stream, r"^(`+)")
+        result = readuntil(stream, ticks)
+        if result === nothing
+            nothing
+        else
+            result = strip(result)
+            # An odd number of backticks wrapping the text will produce a `Code` node, while
+            # an even number will result in a `LaTeX` node. This allows for arbitary
+            # backtick combinations to be embedded inside the resulting node, i.e.
+            #
+            # `a`, ``a``, `` `a` ``, ``` ``a`` ```, ``` `a` ```, etc.
+            #  ^     ^        ^            ^             ^
+            #  C     L        L            C             C       with C=Code and L=LaTeX.
+            #
+            isodd(length(ticks)) ? Code(result) : LaTeX(result)
+        end
+    end
 end
 
 # ––––––––––––––
@@ -45,8 +55,8 @@ end
 # ––––––––––––––
 
 type Image
-    url::UTF8String
-    alt::UTF8String
+    url::String
+    alt::String
 end
 
 @trigger '!' ->
@@ -65,7 +75,7 @@ end
 
 type Link
     text
-    url::UTF8String
+    url::String
 end
 
 @trigger '[' ->
@@ -83,7 +93,7 @@ function link(stream::IO, md::MD)
 end
 
 type Footnote
-    id::UTF8String
+    id::String
     text
 end
 

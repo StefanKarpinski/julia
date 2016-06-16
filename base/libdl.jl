@@ -6,9 +6,17 @@ export DL_LOAD_PATH, RTLD_DEEPBIND, RTLD_FIRST, RTLD_GLOBAL, RTLD_LAZY, RTLD_LOC
     RTLD_NODELETE, RTLD_NOLOAD, RTLD_NOW, dlclose, dlopen, dlopen_e, dlsym, dlsym_e,
     dlpath, find_library, dlext, dllist
 
-const DL_LOAD_PATH = ByteString[]
-@osx_only push!(DL_LOAD_PATH, "@executable_path/../lib/julia")
-@osx_only push!(DL_LOAD_PATH, "@executable_path/../lib")
+"""
+    DL_LOAD_PATH
+
+When calling [`dlopen`](:func:`dlopen`), the paths in this list will be searched first, in
+order, before searching the system locations for a valid library handle.
+"""
+const DL_LOAD_PATH = String[]
+if is_apple()
+    push!(DL_LOAD_PATH, "@loader_path/julia")
+    push!(DL_LOAD_PATH, "@loader_path")
+end
 
 # constants to match JL_RTLD_* in src/julia.h
 const RTLD_LOCAL     = 0x00000001
@@ -19,6 +27,22 @@ const RTLD_NODELETE  = 0x00000010
 const RTLD_NOLOAD    = 0x00000020
 const RTLD_DEEPBIND  = 0x00000040
 const RTLD_FIRST     = 0x00000080
+
+@doc """
+    RTLD_DEEPBIND
+    RTLD_FIRST
+    RTLD_GLOBAL
+    RTLD_LAZY
+    RTLD_LOCAL
+    RTLD_NODELETE
+    RTLD_NOLOAD
+    RTLD_NOW
+
+Enum constant for [`dlopen`](:func:`dlopen`). See your platform man page for details, if
+applicable.
+""" ->
+(RTLD_DEEPBIND, RTLD_FIRST, RTLD_GLOBAL, RTLD_LAZY, RTLD_LOCAL, RTLD_NODELETE, RTLD_NOLOAD, RTLD_NOW)
+
 
 """
     dlsym(handle, sym)
@@ -97,7 +121,7 @@ On success, the return value will be one of the names (potentially prefixed by o
 paths in locations). This string can be assigned to a `global const` and used as the library
 name in future `ccall`'s. On failure, it returns the empty string.
 """
-function find_library(libnames, extrapaths=ASCIIString[])
+function find_library(libnames, extrapaths=String[])
     for lib in libnames
         for path in extrapaths
             l = joinpath(path, lib)
@@ -115,13 +139,13 @@ function find_library(libnames, extrapaths=ASCIIString[])
     end
     return ""
 end
-find_library(libname::Union{Symbol,AbstractString}, extrapaths=ASCIIString[]) =
+find_library(libname::Union{Symbol,AbstractString}, extrapaths=String[]) =
     find_library([string(libname)], extrapaths)
 
 function dlpath(handle::Ptr{Void})
     p = ccall(:jl_pathname_for_handle, Cstring, (Ptr{Void},), handle)
-    s = bytestring(p)
-    @windows_only Libc.free(p)
+    s = unsafe_string(p)
+    is_windows() && Libc.free(p)
     return s
 end
 
@@ -132,12 +156,12 @@ function dlpath(libname::Union{AbstractString, Symbol})
     return path
 end
 
-if OS_NAME === :Darwin
+if is_apple()
     const dlext = "dylib"
-elseif OS_NAME === :Windows
+elseif is_windows()
     const dlext = "dll"
 else
-    #assume OS_NAME === :Linux, or similar
+    #assume is_linux, or similar
     const dlext = "so"
 end
 
@@ -148,7 +172,7 @@ File extension for dynamic libraries (e.g. dll, dylib, so) on the current platfo
 """
 dlext
 
-@linux_only begin
+if is_linux()
     immutable dl_phdr_info
         # Base address of object
         addr::Cuint
@@ -166,38 +190,38 @@ dlext
     # This callback function called by dl_iterate_phdr() on Linux
     function dl_phdr_info_callback(di::dl_phdr_info, size::Csize_t, dynamic_libraries::Array{AbstractString,1})
         # Skip over objects without a path (as they represent this own object)
-        name = bytestring(di.name)
+        name = unsafe_string(di.name)
         if !isempty(name)
             push!(dynamic_libraries, name)
         end
         return convert(Cint, 0)::Cint
     end
-end #@linux_only
+end # linux-only
 
 function dllist()
-    dynamic_libraries = Array(AbstractString,0)
+    dynamic_libraries = Array{AbstractString}(0)
 
-    @linux_only begin
+    @static if is_linux()
         const callback = cfunction(dl_phdr_info_callback, Cint,
                                    (Ref{dl_phdr_info}, Csize_t, Ref{Array{AbstractString,1}} ))
         ccall(:dl_iterate_phdr, Cint, (Ptr{Void}, Ref{Array{AbstractString,1}}), callback, dynamic_libraries)
     end
 
-    @osx_only begin
+    @static if is_apple()
         numImages = ccall(:_dyld_image_count, Cint, (), )
 
         # start at 1 instead of 0 to skip self
         for i in 1:numImages-1
-            name = bytestring(ccall(:_dyld_get_image_name, Cstring, (UInt32,), i))
+            name = unsafe_string(ccall(:_dyld_get_image_name, Cstring, (UInt32,), i))
             push!(dynamic_libraries, name)
         end
     end
 
-    @windows_only begin
+    @static if is_windows()
         ccall(:jl_dllist, Cint, (Any,), dynamic_libraries)
     end
 
-    dynamic_libraries
+    return dynamic_libraries
 end
 
 end # module

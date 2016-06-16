@@ -56,7 +56,6 @@ for T in types
 end
 
 
-
 # immutable NullException <: Exception
 @test isa(NullException(), NullException)
 @test_throws NullException throw(NullException())
@@ -76,69 +75,62 @@ for T in types
     @test x.value === v
 end
 
-p1s = [
-    "Nullable{Bool}()",
-    "Nullable{Char}()",
-    "Nullable{Float16}()",
-    "Nullable{Float32}()",
-    "Nullable{Float64}()",
-    "Nullable{Int128}()",
-    "Nullable{Int16}()",
-    "Nullable{Int32}()",
-    "Nullable{Int64}()",
-    "Nullable{Int8}()",
-    "Nullable{UInt16}()",
-    "Nullable{UInt32}()",
-    "Nullable{UInt64}()",
-    "Nullable{UInt8}()",
-]
-
-p2s = [
-    "Nullable{Bool}(false)",
-    "Nullable{Char}('\0')",
-    "Nullable{Float16}(Float16(0.0))",
-    "Nullable{Float32}(0.0f0)",
-    "Nullable{Float64}(0.0)",
-    "Nullable{Int128}(0)",
-    "Nullable{Int16}(0)",
-    "Nullable{Int32}(0)",
-    "Nullable{Int64}(0)",
-    "Nullable{Int8}(0)",
-    "Nullable{UInt16}(0x0000)",
-    "Nullable{UInt32}(0x00000000)",
-    "Nullable{UInt64}(0x0000000000000000)",
-    "Nullable{UInt8}(0x00)",
-]
-
-p3s = [
-    "Nullable{Bool}(true)",
-    "Nullable{Char}('\x01')",
-    "Nullable{Float16}(Float16(1.0))",
-    "Nullable{Float32}(1.0f0)",
-    "Nullable{Float64}(1.0)",
-    "Nullable{Int128}(1)",
-    "Nullable{Int16}(1)",
-    "Nullable{Int32}(1)",
-    "Nullable{Int64}(1)",
-    "Nullable{Int8}(1)",
-    "Nullable{UInt16}(0x0001)",
-    "Nullable{UInt32}(0x00000001)",
-    "Nullable{UInt64}(0x0000000000000001)",
-    "Nullable{UInt8}(0x01)",
-]
-
 # show{T}(io::IO, x::Nullable{T})
-io = IOBuffer()
+io1 = IOBuffer()
+io2 = IOBuffer()
 for (i, T) in enumerate(types)
     x1 = Nullable{T}()
     x2 = Nullable(zero(T))
     x3 = Nullable(one(T))
-    show(io, x1)
-    takebuf_string(io) == p1s[i]
-    show(io, x2)
-    takebuf_string(io) == p2s[i]
-    show(io, x3)
-    takebuf_string(io) == p3s[i]
+    show(io1, x1)
+    @test takebuf_string(io1) == @sprintf("Nullable{%s}()", T)
+    show(io1, x2)
+    showcompact(io2, get(x2))
+    @test takebuf_string(io1) == @sprintf("Nullable{%s}(%s)", T, takebuf_string(io2))
+    show(io1, x3)
+    showcompact(io2, get(x3))
+    @test takebuf_string(io1) == @sprintf("Nullable{%s}(%s)", T, takebuf_string(io2))
+
+    a1 = [x2]
+    show(IOContext(io1, compact=false), a1)
+    show(IOContext(io2, compact=false), x2)
+    @test takebuf_string(io1) ==
+        @sprintf("Nullable{%s}[%s]", string(T), takebuf_string(io2))
+
+    show(io1, a1)
+    show(IOContext(io2, compact=true), x2)
+    @test takebuf_string(io1) ==
+        @sprintf("Nullable{%s}[%s]", string(T), takebuf_string(io2))
+end
+
+module NullableTestEnum
+    io = IOBuffer()
+    @enum TestEnum a b
+    show(io, Nullable(a))
+    Base.Test.@test takebuf_string(io) == "Nullable{NullableTestEnum.TestEnum}(a)"
+end
+
+# showcompact(io::IO, x::Nullable)
+io1 = IOBuffer()
+io2 = IOBuffer()
+for (i, T) in enumerate(types)
+    x1 = Nullable{T}()
+    x2 = Nullable(zero(T))
+    x3 = Nullable(one(T))
+    showcompact(io1, x1)
+    @test takebuf_string(io1) == "#NULL"
+    showcompact(io1, x2)
+    showcompact(io2, get(x2))
+    @test takebuf_string(io1) == takebuf_string(io2)
+    showcompact(io1, x3)
+    showcompact(io2, get(x3))
+    @test takebuf_string(io1) == takebuf_string(io2)
+
+    a1 = [x2]
+    showcompact(io1, a1)
+    showcompact(io2, x2)
+    @test takebuf_string(io1) ==
+        @sprintf("Nullable{%s}[%s]", string(T), takebuf_string(io2))
 end
 
 # get(x::Nullable)
@@ -281,6 +273,23 @@ end
 @test isnull(convert(Nullable, nothing))
 @test isnull(convert(Nullable{Int}, nothing))
 @test isa(convert(Nullable{Int}, nothing), Nullable{Int})
+
+@test convert(Nullable, 1) === Nullable(1)
+@test convert(Nullable, Nullable(1)) === Nullable(1)
+@test isequal(convert(Nullable, "a"), Nullable("a"))
+@test isequal(convert(Nullable, Nullable("a")), Nullable("a"))
+
+@test promote_type(Nullable{Int}, Int) === Nullable{Int}
+@test promote_type(Nullable{Union{}}, Int) === Nullable{Int}
+@test promote_type(Nullable{Float64}, Nullable{Int}) === Nullable{Float64}
+@test promote_type(Nullable{Union{}}, Nullable{Int}) === Nullable{Int}
+@test promote_type(Nullable{Date}, Nullable{DateTime}) === Nullable{DateTime}
+
+@test Base.promote_op(+, Nullable{Int}, Nullable{Int}) == Nullable{Int}
+@test Base.promote_op(-, Nullable{Int}, Nullable{Int}) == Nullable{Int}
+@test Base.promote_op(+, Nullable{Float64}, Nullable{Int}) == Nullable{Float64}
+@test Base.promote_op(-, Nullable{Float64}, Nullable{Int}) == Nullable{Float64}
+@test Base.promote_op(-, Nullable{DateTime}, Nullable{DateTime}) == Nullable{Base.Dates.Millisecond}
 
 # issue #11675
 @test repr(Nullable()) == "Nullable{Union{}}()"

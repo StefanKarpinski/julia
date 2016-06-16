@@ -4,11 +4,11 @@ mktempdir() do dir
 
 tasks = []
 
-# Create test file...
+# Create test file
 filename = joinpath(dir, "file.txt")
 text = "C1,C2\n1,2\na,b\n"
 
-# List of IO producers...
+# List of IO producers
 l = Vector{Tuple{AbstractString,Function}}()
 
 
@@ -83,7 +83,7 @@ push!(l, ("TCPSocket", io))
 io = (text) -> begin
     a = "\\\\.\\pipe\\uv-test-$(randstring(6))"
     b = joinpath(dir, "socket-$(randstring(6))")
-    socketname = @windows ? a : b
+    socketname = is_windows() ? a : b
     srv = listen(socketname)
     run_test_server(srv, text)
     connect(socketname)
@@ -98,7 +98,7 @@ push!(l, ("PipeEndpoint", io))
 #FIXME See https://github.com/JuliaLang/julia/issues/14747
 #      Reading from open(::Command) seems to deadlock on Linux/Travis
 #=
-@windows ? nothing : begin
+if !is_windows()
 
 # Windows type command not working?
 # See "could not spawn `type 'C:\Users\appveyor\AppData\Local\Temp\1\jul3516.tmp\file.txt'`"
@@ -107,7 +107,7 @@ push!(l, ("PipeEndpoint", io))
 # Pipe
 io = (text) -> begin
     write(filename, text)
-    open(`$(@windows ? "type" : "cat") $filename`)[1]
+    open(`$(is_windows() ? "type" : "cat") $filename`)[1]
 #    Was open(`echo -n $text`)[1]
 #    See https://github.com/JuliaLang/julia/issues/14747
 end
@@ -138,7 +138,6 @@ verbose = false
 
 
 for (name, f) in l
-
     io = ()->(s=f(text); push!(open_streams, s); s)
 
     write(filename, text)
@@ -179,12 +178,11 @@ for (name, f) in l
 
     for text in [
         old_text,
-        UTF8String(Char['A' + i % 52 for i in 1:(div(Base.SZ_UNBUFFERED_IO,2))]),
-        UTF8String(Char['A' + i % 52 for i in 1:(    Base.SZ_UNBUFFERED_IO -1)]),
-        UTF8String(Char['A' + i % 52 for i in 1:(    Base.SZ_UNBUFFERED_IO   )]),
-        UTF8String(Char['A' + i % 52 for i in 1:(    Base.SZ_UNBUFFERED_IO +1)])
+        String(Char['A' + i % 52 for i in 1:(div(Base.SZ_UNBUFFERED_IO,2))]),
+        String(Char['A' + i % 52 for i in 1:(    Base.SZ_UNBUFFERED_IO -1)]),
+        String(Char['A' + i % 52 for i in 1:(    Base.SZ_UNBUFFERED_IO   )]),
+        String(Char['A' + i % 52 for i in 1:(    Base.SZ_UNBUFFERED_IO +1)])
     ]
-
         write(filename, text)
 
         verbose && println("$name readstring...")
@@ -268,7 +266,6 @@ for (name, f) in l
     write(filename, text)
 
     if !(typeof(io()) in [Base.PipeEndpoint, Pipe, TCPSocket])
-
         verbose && println("$name position...")
         @test (s = io(); read!(s, Vector{UInt8}(4)); position(s))  == 4
 
@@ -299,7 +296,7 @@ for (name, f) in l
     @test readstring("$filename.to") == text
 
     verbose && println("$name write(::IOBuffer, ...)")
-    to = IOBuffer(Vector{UInt8}(copy(text)), false, true)
+    to = IOBuffer(copy(text.data), false, true)
     write(to, io())
     @test takebuf_string(to) == text
 
@@ -363,7 +360,6 @@ test_read_nbyte()
 @test_throws EOFError read(DevNull, UInt8)
 @test close(DevNull) === nothing
 @test flush(DevNull) === nothing
-@test copy(DevNull) === DevNull
 @test eof(DevNull)
 @test print(DevNull, "go to /dev/null") === nothing
 
@@ -386,9 +382,9 @@ f = joinpath(dir, "test.txt")
 open(io->write(io, "123"), f, "w")
 f1 = open(f)
 f2 = Base.Filesystem.open(f, Base.Filesystem.JL_O_RDONLY)
-@test read(f1, UInt8) == read(f2, UInt8) == '1'
-@test read(f1, UInt8) == read(f2, UInt8) == '2'
-@test read(f1, UInt8) == read(f2, UInt8) == '3'
+@test read(f1, UInt8) == read(f2, UInt8) == UInt8('1')
+@test read(f1, UInt8) == read(f2, UInt8) == UInt8('2')
+@test read(f1, UInt8) == read(f2, UInt8) == UInt8('3')
 @test_throws EOFError read(f1, UInt8)
 @test_throws EOFError read(f2, UInt8)
 close(f1)
@@ -415,11 +411,14 @@ rm(f)
 io = Base.Filesystem.open(f, Base.Filesystem.JL_O_WRONLY | Base.Filesystem.JL_O_CREAT | Base.Filesystem.JL_O_EXCL, 0o000)
 @test write(io, "abc") == 3
 close(io)
-@unix_only begin
+if !is_windows() && get(ENV, "USER", "") != "root" && get(ENV, "HOME", "") != "/root"
     # msvcrt _wchmod documentation states that all files are readable,
     # so we don't test that it correctly set the umask on windows
     @test_throws SystemError open(f)
     @test_throws Base.UVError Base.Filesystem.open(f, Base.Filesystem.JL_O_RDONLY)
+else
+    is_windows() || warn("file permissions tests skipped due to running tests as root (not recommended)")
+    close(open(f))
 end
 chmod(f, 0o400)
 f1 = open(f)
@@ -462,9 +461,12 @@ close(f1)
 close(f2)
 @test eof(f1)
 @test_throws Base.UVError eof(f2)
-
-@test_throws SystemError open(f, "r+")
-@test_throws Base.UVError Base.Filesystem.open(f, Base.Filesystem.JL_O_RDWR)
+if get(ENV, "USER", "") != "root" && get(ENV, "HOME", "") != "/root"
+    @test_throws SystemError open(f, "r+")
+    @test_throws Base.UVError Base.Filesystem.open(f, Base.Filesystem.JL_O_RDWR)
+else
+    warn("file permissions tests skipped due to running tests as root (not recommended)")
+end
 chmod(f, 0o600)
 f1 = open(f, "r+")
 f2 = Base.Filesystem.open(f, Base.Filesystem.JL_O_RDWR)
@@ -472,7 +474,8 @@ f2 = Base.Filesystem.open(f, Base.Filesystem.JL_O_RDWR)
 @test skip(f2, 10) == f2
 @test eof(f1)
 @test eof(f2)
-@test write(f1, '*') == 1; @test flush(f1) == f1
+@test write(f1, '*') == 1
+@test flush(f1) === nothing
 @test !eof(f2)
 @test skip(f2, 1) == f2
 @test write(f2, '*') == 1
@@ -484,4 +487,4 @@ close(f1)
 close(f2)
 rm(f)
 
-end
+end # mktempdir() do dir

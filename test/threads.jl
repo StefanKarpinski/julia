@@ -47,8 +47,8 @@ function test_threaded_atomic_minmax{T}(m::T,n::T)
     mid = m + (n-m)>>1
     x = Atomic{T}(mid)
     y = Atomic{T}(mid)
-    oldx = Array(T,n-m+1)
-    oldy = Array(T,n-m+1)
+    oldx = Array{T}(n-m+1)
+    oldy = Array{T}(n-m+1)
     @threads for i = m:n
         oldx[i-m+1] = atomic_min!(x, T(i))
         oldy[i-m+1] = atomic_max!(y, T(i))
@@ -129,7 +129,7 @@ module M14726_2
 using Base.Test
 using Base.Threads
 @threads for i in 1:100
-    # Make sure current module is the same with the one on the thread that
+    # Make sure current module is the same as the one on the thread that
     # pushes the work onto the threads.
     # The @test might not be particularly meaningful currently since the
     # thread infrastructures swallows the error. (See also above)
@@ -166,6 +166,8 @@ function test_atomic_read(commbuf::CommBuf, n::Int)
         var1 = commbuf.var1[]
         correct &= var1 >= var2
         var1 == n && break
+        # Temporary solution before we have gc transition support in codegen.
+        ccall(:jl_gc_safepoint, Void, ())
     end
     commbuf.correct_read = correct
 end
@@ -209,6 +211,8 @@ function test_fence(p::Peterson, id::Int, n::Int)
         atomic_fence()
         while p.flag[otherid][] != 0 && p.turn[] == otherid
             # busy wait
+            # Temporary solution before we have gc transition support in codegen.
+            ccall(:jl_gc_safepoint, Void, ())
         end
         # critical section
         p.critical[id][] = 1
@@ -234,8 +238,9 @@ test_fence()
 let atomic_types = [Int8, Int16, Int32, Int64, Int128,
                     UInt8, UInt16, UInt32, UInt64, UInt128,
                     Float16, Float32, Float64]
-    # Temporarily omit 128-bit types
-    if Base.ARCH === :i686
+    # Temporarily omit 128-bit types on 32bit x86
+    # 128-bit atomics do not exist on AArch32.
+    if Sys.ARCH === :i686 || startswith(string(Sys.ARCH), "arm")
         filter!(T -> sizeof(T)<=8, atomic_types)
     end
     for T in atomic_types
@@ -260,6 +265,8 @@ function test_atomic_cas!{T}(var::Atomic{T}, range::StepRange{Int,Int})
         while true
             old = atomic_cas!(var, T(i-1), T(i))
             old == T(i-1) && break
+            # Temporary solution before we have gc transition support in codegen.
+            ccall(:jl_gc_safepoint, Void, ())
         end
     end
 end

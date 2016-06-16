@@ -25,7 +25,7 @@ immutable JLOptions
     depwarn::Int8
     can_inline::Int8
     fast_math::Int8
-    worker::Int8
+    worker::Ptr{UInt8}
     handle_signals::Int8
     use_precompiled::Int8
     use_compilecache::Int8
@@ -45,7 +45,7 @@ function show(io::IO, opt::JLOptions)
     for (i,f) in enumerate(fieldnames(opt))
         v = getfield(opt,f)
         if isa(v, Ptr{UInt8})
-            v = v != C_NULL ? bytestring(v) : ""
+            v = v != C_NULL ? unsafe_string(v) : ""
         end
         println(io, "  ", f, " = ", repr(v), i < nfields ? "," : "")
     end

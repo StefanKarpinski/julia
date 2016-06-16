@@ -88,7 +88,7 @@ function get_ovec(match_data)
                 (Ptr{Void},), match_data)
     n = ccall((:pcre2_get_ovector_count_8, PCRE_LIB), UInt32,
               (Ptr{Void},), match_data)
-    pointer_to_array(ptr, 2n, false)
+    unsafe_wrap(Array, ptr, 2n, false)
 end
 
 function compile(pattern::AbstractString, options::Integer)
@@ -120,10 +120,10 @@ free_match_context(context) =
     ccall((:pcre2_match_context_free_8, PCRE_LIB), Void, (Ptr{Void},), context)
 
 function err_message(errno)
-  buffer = Array(UInt8, 256)
-  ccall((:pcre2_get_error_message_8, PCRE_LIB), Void,
-        (Int32, Ptr{UInt8}, Csize_t), errno, buffer, sizeof(buffer))
-  bytestring(pointer(buffer))
+    buffer = Array{UInt8}(256)
+    ccall((:pcre2_get_error_message_8, PCRE_LIB), Void,
+          (Int32, Ptr{UInt8}, Csize_t), errno, buffer, sizeof(buffer))
+    unsafe_string(pointer(buffer))
 end
 
 function exec(re,subject,offset,options,match_data)
@@ -136,8 +136,8 @@ function exec(re,subject,offset,options,match_data)
 end
 
 function create_match_data(re)
-  ccall((:pcre2_match_data_create_from_pattern_8, PCRE_LIB),
-        Ptr{Void}, (Ptr{Void}, Ptr{Void}), re, C_NULL)
+    ccall((:pcre2_match_data_create_from_pattern_8, PCRE_LIB),
+          Ptr{Void}, (Ptr{Void}, Ptr{Void}), re, C_NULL)
 end
 
 function substring_number_from_name(re, name)
@@ -146,27 +146,27 @@ function substring_number_from_name(re, name)
 end
 
 function substring_length_bynumber(match_data, number)
-  s = Ref{Csize_t}()
-  rc = ccall((:pcre2_substring_length_bynumber_8, PCRE_LIB), Cint,
-        (Ptr{Void}, UInt32, Ref{Csize_t}), match_data, number, s)
-  rc < 0 && error("PCRE error: $(err_message(rc))")
-  convert(Int, s[])
+    s = Ref{Csize_t}()
+    rc = ccall((:pcre2_substring_length_bynumber_8, PCRE_LIB), Cint,
+          (Ptr{Void}, UInt32, Ref{Csize_t}), match_data, number, s)
+    rc < 0 && error("PCRE error: $(err_message(rc))")
+    convert(Int, s[])
 end
 
 function substring_copy_bynumber(match_data, number, buf, buf_size)
-  s = Ref{Csize_t}(buf_size)
-  rc = ccall((:pcre2_substring_copy_bynumber_8, PCRE_LIB), Cint,
-             (Ptr{Void}, UInt32, Ptr{UInt8}, Ref{Csize_t}),
-             match_data, number, buf, s)
-  rc < 0 && error("PCRE error: $(err_message(rc))")
-  convert(Int, s[])
+    s = Ref{Csize_t}(buf_size)
+    rc = ccall((:pcre2_substring_copy_bynumber_8, PCRE_LIB), Cint,
+               (Ptr{Void}, UInt32, Ptr{UInt8}, Ref{Csize_t}),
+               match_data, number, buf, s)
+    rc < 0 && error("PCRE error: $(err_message(rc))")
+    convert(Int, s[])
 end
 
 function capture_names(re)
     name_count = info(re, INFO_NAMECOUNT, UInt32)
     name_entry_size = info(re, INFO_NAMEENTRYSIZE, UInt32)
     nametable_ptr = info(re, INFO_NAMETABLE, Ptr{UInt8})
-    names = Dict{Int, ASCIIString}()
+    names = Dict{Int, String}()
     for i=1:name_count
         offset = (i-1)*name_entry_size + 1
         # The capture group index corresponding to name 'i' is stored as a
@@ -176,7 +176,7 @@ function capture_names(re)
         idx = (high_byte << 8) | low_byte
         # The capture group name is a null-terminated string located directly
         # after the index.
-        names[idx] = bytestring(nametable_ptr+offset+1)
+        names[idx] = unsafe_string(nametable_ptr+offset+1)
     end
     names
 end

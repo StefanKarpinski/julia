@@ -15,8 +15,7 @@ Base.read{T<:Enum}(io::IO, ::Type{T}) = T(read(io, Int32))
 # generate code to test whether expr is in the given set of values
 function membershiptest(expr, values)
     lo, hi = extrema(values)
-    sv = sort(values)
-    if sv == [lo:hi;]
+    if length(values) == hi - lo + 1
         :($lo <= $expr <= $hi)
     elseif length(values) < 20
         foldl((x1,x2)->:($x1 || ($expr == $x2)), :($expr == $(values[1])), values[2:end])
@@ -35,7 +34,7 @@ macro enum(T,syms...)
         throw(ArgumentError("invalid type expression for enum $T"))
     end
     typename = T
-    vals = Array(Tuple{Symbol,Integer},0)
+    vals = Array{Tuple{Symbol,Integer}}(0)
     lo = hi = 0
     i = Int32(-1)
     hasexpr = false
@@ -94,16 +93,24 @@ macro enum(T,syms...)
             end
         end
         function Base.show(io::IO,x::$(esc(typename)))
-            if Base.limit_output(io)
+            if get(io, :compact, false)
                 print(io, x)
             else
-                print(io, x, "::", $(esc(typename)), " = ", Int(x))
+                print(io, x, "::")
+                showcompact(io, typeof(x))
+                print(io, " = ", Int(x))
             end
         end
-        function Base.writemime(io::IO,::MIME"text/plain",::Type{$(esc(typename))})
-            print(io, "Enum ", $(esc(typename)), ":")
-            for (sym, i) in $vals
-                print(io, "\n", sym, " = ", i)
+        function Base.show(io::IO,t::Type{$(esc(typename))})
+            if get(io, :multiline, false)
+                print(io, "Enum ")
+                Base.show_datatype(io, t)
+                print(io, ":")
+                for (sym, i) in $vals
+                    print(io, "\n", sym, " = ", i)
+                end
+            else
+                Base.show_datatype(io, t)
             end
         end
     end

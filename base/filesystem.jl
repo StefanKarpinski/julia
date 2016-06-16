@@ -42,10 +42,12 @@ export File,
 import Base:
     UVError, _sizeof_uv_fs, check_open, close, eof, eventloop, fd, isopen,
     nb_available, position, read, read!, readavailable, seek, seekend, show,
-    skip, stat, unsafe_read, unsafe_write, utf16to8, utf8to16, uv_error,
-    uvhandle, uvtype, write
+    skip, stat, unsafe_read, unsafe_write, transcode, uv_error, uvhandle,
+    uvtype, write
 
-@windows_only import Base: cwstring
+if is_windows()
+    import Base: cwstring
+end
 
 include("path.jl")
 include("stat.jl")
@@ -96,7 +98,7 @@ function close(f::File)
     uv_error("close", err)
     f.handle = RawFD(-1)
     f.open = false
-    return f
+    return nothing
 end
 
 # sendfile is the most efficient way to copy a file (or any file descriptor)
@@ -171,9 +173,9 @@ function readbytes!(f::File, b::Array{UInt8}, nb=length(b))
     uv_error("read",ret)
     return ret
 end
-read(io::File) = read!(io, Array(UInt8, nb_available(io)))
+read(io::File) = read!(io, Array{UInt8}(nb_available(io)))
 readavailable(io::File) = read(io)
-read(io::File, nb::Integer) = read!(io, Array(UInt8, min(nb, nb_available(io))))
+read(io::File, nb::Integer) = read!(io, Array{UInt8}(min(nb, nb_available(io))))
 
 const SEEK_SET = Int32(0)
 const SEEK_CUR = Int32(1)

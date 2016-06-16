@@ -13,9 +13,9 @@ data_out = collect(s)
 @test length(data_out) == length(data_in)
 
 # hash
-s1 = Set{ASCIIString}(["bar", "foo"])
-s2 = Set{ASCIIString}(["foo", "bar"])
-s3 = Set{ASCIIString}(["baz"])
+s1 = Set(["bar", "foo"])
+s2 = Set(["foo", "bar"])
+s3 = Set(["baz"])
 @test hash(s1) == hash(s2)
 @test hash(s1) != hash(s3)
 
@@ -43,6 +43,9 @@ s1 = similar(Set([1,"hello"]))
 s2 = similar(Set{Float32}([2.0f0,3.0f0,4.0f0]))
 @test isequal(s2, Set())
 @test is(eltype(s2), Float32)
+s3 = similar(Set([1,"hello"]),Float32)
+@test isequal(s3, Set())
+@test is(eltype(s3), Float32)
 
 # show
 @test sprint(show, Set()) == "Set{Any}()"
@@ -204,6 +207,20 @@ u = unique([1,1,2])
 @test unique(iseven, [5,1,8,9,3,4,10,7,2,6]) == [5,8]
 @test unique(n->n % 3, [5,1,8,9,3,4,10,7,2,6]) == [5,1,9]
 
+# allunique
+@test allunique([])
+@test allunique(Set())
+@test allunique([1,2,3])
+@test allunique([:a,:b,:c])
+@test allunique(Set([1,2,3]))
+@test !allunique([1,1,2])
+@test !allunique([:a,:b,:c,:a])
+@test allunique(4:7)
+@test allunique(1:1)
+@test allunique(4.0:0.3:7.0)
+@test allunique(4:-1:5)       # empty range
+@test allunique(7:-1:1)       # negative step
+
 # filter
 s = Set([1,2,3,4])
 @test isequal(filter(isodd,s), Set([1,3]))
@@ -227,3 +244,5 @@ let s = Set(1:5)
 end
 
 @test pop!(Set(1:2), 2, nothing) == 2
+
+@test length(Set(['x',120])) == 2

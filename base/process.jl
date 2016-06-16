@@ -8,12 +8,12 @@ const UV_PROCESS_DETACHED = UInt8(1 << 3)
 const UV_PROCESS_WINDOWS_HIDE = UInt8(1 << 4)
 
 immutable Cmd <: AbstractCmd
-    exec::Vector{ByteString}
+    exec::Vector{String}
     ignorestatus::Bool
     flags::UInt32 # libuv process flags
-    env::Union{Array{ByteString},Void}
-    dir::UTF8String
-    Cmd(exec::Vector{ByteString}) =
+    env::Union{Array{String},Void}
+    dir::String
+    Cmd(exec::Vector{String}) =
         new(exec, false, 0x00, nothing, "")
     Cmd(cmd::Cmd, ignorestatus, flags, env, dir) =
         new(cmd.exec, ignorestatus, flags, env,
@@ -94,6 +94,9 @@ immutable AndCmds <: AbstractCmd
     AndCmds(a::AbstractCmd, b::AbstractCmd) = new(a, b)
 end
 
+hash(x::AndCmds, h::UInt) = hash(x.a, hash(x.b, h))
+==(x::AndCmds, y::AndCmds) = x.a == y.a && x.b == y.b
+
 shell_escape(cmd::Cmd) = shell_escape(cmd.exec...)
 
 function show(io::IO, cmd::Cmd)
@@ -137,28 +140,12 @@ immutable FileRedirect
     filename::AbstractString
     append::Bool
     function FileRedirect(filename, append)
-        if lowercase(filename) == (@unix? "/dev/null" : "nul")
+        if lowercase(filename) == (@static is_windows() ? "nul" : "/dev/null")
             warn_once("for portability use DevNull instead of a file redirect")
         end
         new(filename, append)
     end
 end
-
-immutable DevNullStream <: IO end
-const DevNull = DevNullStream()
-isreadable(::DevNullStream) = false
-iswritable(::DevNullStream) = true
-isopen(::DevNullStream) = true
-read(::DevNullStream, ::Type{UInt8}) = throw(EOFError())
-write(::DevNullStream, ::UInt8) = 1
-close(::DevNullStream) = nothing
-flush(::DevNullStream) = nothing
-copy(::DevNullStream) = DevNull
-wait_connected(::DevNullStream) = nothing
-wait_readnb(::DevNullStream) = wait()
-wait_readbyte(::DevNullStream) = wait()
-wait_close(::DevNullStream) = wait()
-eof(::DevNullStream) = true
 
 uvhandle(::DevNullStream) = C_NULL
 uvtype(::DevNullStream) = UV_STREAM
@@ -210,23 +197,23 @@ Mark a command object so that it will be run in a new process group, allowing it
 """
 detach(cmd::Cmd) = Cmd(cmd; detach=true)
 
-# like bytestring(s), but throw an error if s contains NUL, since
+# like String(s), but throw an error if s contains NUL, since
 # libuv requires NUL-terminated strings
 function cstr(s)
     if Base.containsnul(s)
         throw(ArgumentError("strings containing NUL cannot be passed to spawned processes"))
     end
-    return bytestring(s)
+    return String(s)
 end
 
 # convert various env representations into an array of "key=val" strings
 byteenv{S<:AbstractString}(env::AbstractArray{S}) =
-    ByteString[cstr(x) for x in env]
+    String[cstr(x) for x in env]
 byteenv(env::Associative) =
-    ByteString[cstr(string(k)*"="*string(v)) for (k,v) in env]
+    String[cstr(string(k)*"="*string(v)) for (k,v) in env]
 byteenv(env::Void) = nothing
 byteenv{T<:AbstractString}(env::Union{AbstractVector{Pair{T}}, Tuple{Vararg{Pair{T}}}}) =
-    ByteString[cstr(k*"="*string(v)) for (k,v) in env]
+    String[cstr(k*"="*string(v)) for (k,v) in env]
 
 setenv(cmd::Cmd, env; dir="") = Cmd(cmd; env=byteenv(env), dir=dir)
 setenv{T<:AbstractString}(cmd::Cmd, env::Pair{T}...; dir="") =
@@ -236,6 +223,8 @@ setenv(cmd::Cmd; dir="") = Cmd(cmd; dir=dir)
 (&)(left::AbstractCmd, right::AbstractCmd) = AndCmds(left, right)
 redir_out(src::AbstractCmd, dest::AbstractCmd) = OrCmds(src, dest)
 redir_err(src::AbstractCmd, dest::AbstractCmd) = ErrOrCmds(src, dest)
+Base.mr_empty{T2<:Base.AbstractCmd}(f, op::typeof(&), T1::Type{T2}) =
+    throw(ArgumentError("reducing over an empty collection of type $T1 with operator & is not allowed"))
 
 # Stream Redirects
 redir_out(dest::Redirectable, src::AbstractCmd) = CmdRedirect(src, dest, STDIN_NO)
@@ -478,7 +467,7 @@ end
 
 function spawn(cmd::Cmd, stdios::StdIOSet, exitcb::Callback, closecb::Callback; chain::Nullable{ProcessChain}=Nullable{ProcessChain}())
     loop = eventloop()
-    pp = Process(cmd, C_NULL, stdios[1], stdios[2], stdios[3]);
+    pp = Process(cmd, C_NULL, stdios[1], stdios[2], stdios[3])
     pp.exitcb = exitcb
     pp.closecb = closecb
     setup_stdio(stdios) do in, out, err
@@ -511,7 +500,7 @@ end
 #   | - An IO to be passed to the child
 #   | - DevNull to pass /dev/null
 #   | - An Filesystem.File object to redirect the output to
-#   \ - An ASCIIString specifying a filename to be opened
+#   \ - A string specifying a filename to be opened
 
 spawn_opts_swallow(stdios::StdIOSet, exitcb::Callback=false, closecb::Callback=false) =
     (stdios,exitcb,closecb)
@@ -585,7 +574,7 @@ function read(cmd::AbstractCmd, stdin::Redirectable=DevNull)
 end
 
 function readstring(cmd::AbstractCmd, stdin::Redirectable=DevNull)
-    return bytestring(read(cmd, stdin))
+    return String(read(cmd, stdin))
 end
 
 function writeall(cmd::AbstractCmd, stdin::AbstractString, stdout::Redirectable=DevNull)
@@ -682,42 +671,42 @@ end
 
 ## implementation of `cmd` syntax ##
 
-arg_gen()          = ByteString[]
-arg_gen(x::AbstractString) = ByteString[cstr(x)]
+arg_gen()          = String[]
+arg_gen(x::AbstractString) = String[cstr(x)]
 arg_gen(cmd::Cmd)  = cmd.exec
 
 function arg_gen(head)
     if applicable(start, head)
-        vals = ByteString[]
+        vals = String[]
         for x in head
             push!(vals, cstr(string(x)))
         end
         return vals
     else
-        return ByteString[cstr(string(head))]
+        return String[cstr(string(head))]
     end
 end
 
 function arg_gen(head, tail...)
     head = arg_gen(head)
     tail = arg_gen(tail...)
-    vals = ByteString[]
+    vals = String[]
     for h = head, t = tail
-        push!(vals, cstr(bytestring(h, t)))
+        push!(vals, cstr(string(h,t)))
     end
-    vals
+    return vals
 end
 
 function cmd_gen(parsed)
-    args = ByteString[]
+    args = String[]
     for arg in parsed
         append!(args, arg_gen(arg...))
     end
-    Cmd(args)
+    return Cmd(args)
 end
 
 macro cmd(str)
-    :(cmd_gen($(shell_parse(str)[1])))
+    return :(cmd_gen($(shell_parse(str)[1])))
 end
 
 wait(x::Process)      = if !process_exited(x); stream_wait(x, x.exitnotify); end

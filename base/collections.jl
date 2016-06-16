@@ -2,7 +2,7 @@
 
 module Collections
 
-import Base: setindex!, done, get, hash, haskey, isempty, length, next, getindex, start
+import Base: setindex!, done, get, hash, haskey, isempty, length, next, getindex, start, copymutable
 import ..Order: Forward, Ordering, lt
 
 export
@@ -15,7 +15,6 @@ export
     heappush!,
     isheap,
     peek
-
 
 
 # Heap operations on flat arrays
@@ -107,7 +106,7 @@ end
 
 Returns a new vector in binary heap order, optionally using the given ordering.
 """
-heapify(xs::AbstractArray, o::Ordering=Forward) = heapify!(copy(xs), o)
+heapify(xs::AbstractArray, o::Ordering=Forward) = heapify!(copymutable(xs), o)
 
 """
     isheap(v, [ord])
@@ -149,7 +148,7 @@ type PriorityQueue{K,V,O<:Ordering} <: Associative{K,V}
     index::Dict{K, Int}
 
     function PriorityQueue(o::O)
-        new(Array(Pair{K,V}, 0), o, Dict{K, Int}())
+        new(Array{Pair{K,V}}(0), o, Dict{K, Int}())
     end
 
     PriorityQueue() = PriorityQueue{K,V,O}(Forward)
@@ -164,7 +163,7 @@ type PriorityQueue{K,V,O<:Ordering} <: Associative{K,V}
     end
 
     function PriorityQueue(itr, o::O)
-        xs = Array(Pair{K,V}, length(itr))
+        xs = Array{Pair{K,V}}(length(itr))
         index = Dict{K, Int}()
         for (i, (k, v)) in enumerate(itr)
             xs[i] = Pair{K,V}(k, v)

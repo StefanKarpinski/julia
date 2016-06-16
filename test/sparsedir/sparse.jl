@@ -63,7 +63,7 @@ for i = 1 : 10
 end
 
 # sparse ref
-a116 = reshape(1:16, 4, 4)
+a116 = copy(reshape(1:16, 4, 4))
 s116 = sparse(a116)
 p = [4, 1, 2, 3, 2]
 @test full(s116[p,:]) == a116[p,:]
@@ -333,10 +333,10 @@ end
 @test var(sparse(Int[])) === NaN
 
 for f in (sum, prod, minimum, maximum, var)
-    @test isequal(f(spzeros(0, 1), 1), f(Array(Int, 0, 1), 1))
-    @test isequal(f(spzeros(0, 1), 2), f(Array(Int, 0, 1), 2))
-    @test isequal(f(spzeros(0, 1), (1, 2)), f(Array(Int, 0, 1), (1, 2)))
-    @test isequal(f(spzeros(0, 1), 3), f(Array(Int, 0, 1), 3))
+    @test isequal(f(spzeros(0, 1), 1), f(Array{Int}(0, 1), 1))
+    @test isequal(f(spzeros(0, 1), 2), f(Array{Int}(0, 1), 2))
+    @test isequal(f(spzeros(0, 1), (1, 2)), f(Array{Int}(0, 1), (1, 2)))
+    @test isequal(f(spzeros(0, 1), 3), f(Array{Int}(0, 1), 3))
 end
 
 # spdiagm
@@ -389,11 +389,11 @@ A = speye(Bool, 5)
 @test sprand(4,5,0.5).^0 == sparse(ones(4,5))
 
 # issue #5985
-@test sprandbool(4, 5, 0.0) == sparse(zeros(Bool, 4, 5))
-@test sprandbool(4, 5, 1.00) == sparse(ones(Bool, 4, 5))
+@test sprand(Bool, 4, 5, 0.0) == sparse(zeros(Bool, 4, 5))
+@test sprand(Bool, 4, 5, 1.00) == sparse(ones(Bool, 4, 5))
 sprb45nnzs = zeros(5)
 for i=1:5
-    sprb45 = sprandbool(4, 5, 0.5)
+    sprb45 = sprand(Bool, 4, 5, 0.5)
     @test length(sprb45) == 20
     sprb45nnzs[i] = sum(sprb45)[1]
 end
@@ -547,6 +547,40 @@ let a = spzeros(Int, 10, 10)
     @test a[1,:] == sparse([1:10;])
     a[:,2] = 1:10
     @test a[:,2] == sparse([1:10;])
+
+    a[1,1:0] = []
+    @test a[1,:] == sparse([1; 1; 3:10])
+    a[1:0,2] = []
+    @test a[:,2] == sparse([1:10;])
+    a[1,1:0] = 0
+    @test a[1,:] == sparse([1; 1; 3:10])
+    a[1:0,2] = 0
+    @test a[:,2] == sparse([1:10;])
+    a[1,1:0] = 1
+    @test a[1,:] == sparse([1; 1; 3:10])
+    a[1:0,2] = 1
+    @test a[:,2] == sparse([1:10;])
+
+    @test_throws BoundsError a[:,11] = spzeros(10,1)
+    @test_throws BoundsError a[11,:] = spzeros(1,10)
+    @test_throws BoundsError a[:,-1] = spzeros(10,1)
+    @test_throws BoundsError a[-1,:] = spzeros(1,10)
+    @test_throws BoundsError a[0:9] = spzeros(1,10)
+    @test_throws BoundsError a[:,11] = 0
+    @test_throws BoundsError a[11,:] = 0
+    @test_throws BoundsError a[:,-1] = 0
+    @test_throws BoundsError a[-1,:] = 0
+    @test_throws BoundsError a[0:9] = 0
+    @test_throws BoundsError a[:,11] = 1
+    @test_throws BoundsError a[11,:] = 1
+    @test_throws BoundsError a[:,-1] = 1
+    @test_throws BoundsError a[-1,:] = 1
+    @test_throws BoundsError a[0:9] = 1
+
+    @test_throws DimensionMismatch a[1:2,1:2] = 1:3
+    @test_throws DimensionMismatch a[1:2,1] = 1:3
+    @test_throws DimensionMismatch a[1,1:2] = 1:3
+    @test_throws DimensionMismatch a[1:2] = 1:3
 end
 
 let A = spzeros(Int, 10, 20)
@@ -589,7 +623,7 @@ let A = speye(Int, 5), I=1:10, X=reshape([trues(10); falses(15)],5,5)
     @test A[I] == A[X] == collect(1:10)
 end
 
-let S = sprand(50, 30, 0.5, x->round(Int,rand(x)*100)), I = sprandbool(50, 30, 0.2)
+let S = sprand(50, 30, 0.5, x->round(Int,rand(x)*100)), I = sprand(Bool, 50, 30, 0.2)
     FS = full(S)
     FI = full(I)
     @test sparse(FS[FI]) == S[I] == S[FI]
@@ -650,7 +684,7 @@ let A = sprand(5,5,0.5,(n)->rand(Float64,n)), ACPY = copy(A)
     @test A == ACPY
     C = reinterpret(Int64, A, (25, 1))
     @test A == ACPY
-    D = reinterpret(Int64, B)
+    D = reinterpret(Int64, copy(B))
     @test C == D
 end
 
@@ -670,7 +704,7 @@ let S = spzeros(10,8), A = full(S)
     @test indmin(S) == indmin(A) == 1
 end
 
-let A = Array(Int,0,0), S = sparse(A)
+let A = Array{Int}(0,0), S = sparse(A)
     iA = try indmax(A) end
     iS = try indmax(S) end
     @test iA === iS === nothing
@@ -973,7 +1007,7 @@ end
 @test spzeros(1,2) .* spzeros(0,1)  == zeros(0,2)
 
 # test throws
-A = sprandbool(5,5,0.2)
+A = sprand(Bool, 5,5,0.2)
 @test_throws ArgumentError reinterpret(Complex128,A)
 @test_throws ArgumentError reinterpret(Complex128,A,(5,5))
 @test_throws DimensionMismatch reinterpret(Int8,A,(20,))
@@ -990,9 +1024,9 @@ A = speye(5)
 @test convert(Matrix,A) == full(A)
 
 # test float
-A = sprandbool(5,5,0.0)
+A = sprand(Bool, 5,5,0.0)
 @test eltype(float(A)) == Float64  # issue #11658
-A = sprandbool(5,5,0.2)
+A = sprand(Bool, 5,5,0.2)
 @test float(A) == float(full(A))
 
 # test sparsevec
@@ -1112,6 +1146,7 @@ let
     @test ishermitian(A) == true
     @test issymmetric(A) == true
 
+    # 15504
     m = n = 5
     colptr = [1, 5, 9, 13, 13, 17]
     rowval = [1, 2, 3, 5, 1, 2, 3, 5, 1, 2, 3, 5, 1, 2, 3, 5]
@@ -1120,6 +1155,14 @@ let
     @test issymmetric(A) == true
     A.nzval[end - 3]  = 2.0
     @test issymmetric(A) == false
+
+    # 16521
+    @test issymmetric(sparse([0 0; 1 0])) == false
+    @test issymmetric(sparse([0 1; 0 0])) == false
+    @test issymmetric(sparse([0 0; 1 1])) == false
+    @test issymmetric(sparse([1 0; 1 0])) == false
+    @test issymmetric(sparse([0 1; 1 0])) == true
+    @test issymmetric(sparse([1 1; 1 0])) == true
 end
 
 # equality ==
@@ -1196,10 +1239,12 @@ Ac = sprandn(20,20,.5) + im* sprandn(20,20,.5)
 Ar = sprandn(20,20,.5)
 @test cond(A,1) == 1.0
 # For a discussion of the tolerance, see #14778
-@test 0.99 <= cond(Ar, 1) \ norm(Ar, 1) * norm(inv(full(Ar)), 1) < 3
-@test 0.99 <= cond(Ac, 1) \ norm(Ac, 1) * norm(inv(full(Ac)), 1) < 3
-@test 0.99 <= cond(Ar, Inf) \ norm(Ar, Inf) * norm(inv(full(Ar)), Inf) < 3
-@test 0.99 <= cond(Ac, Inf) \ norm(Ac, Inf) * norm(inv(full(Ac)), Inf) < 3
+if Base.USE_GPL_LIBS
+    @test 0.99 <= cond(Ar, 1) \ norm(Ar, 1) * norm(inv(full(Ar)), 1) < 3
+    @test 0.99 <= cond(Ac, 1) \ norm(Ac, 1) * norm(inv(full(Ac)), 1) < 3
+    @test 0.99 <= cond(Ar, Inf) \ norm(Ar, Inf) * norm(inv(full(Ar)), Inf) < 3
+    @test 0.99 <= cond(Ac, Inf) \ norm(Ac, Inf) * norm(inv(full(Ac)), Inf) < 3
+end
 @test_throws ArgumentError cond(A,2)
 @test_throws ArgumentError cond(A,3)
 let Arect = spzeros(10, 6)
@@ -1213,11 +1258,13 @@ Ac = sprandn(20,20,.5) + im* sprandn(20,20,.5)
 Aci = ceil(Int64,100*sprand(20,20,.5))+ im*ceil(Int64,sprand(20,20,.5))
 Ar = sprandn(20,20,.5)
 Ari = ceil(Int64,100*Ar)
-@test_approx_eq_eps Base.SparseArrays.normestinv(Ac,3) norm(inv(full(Ac)),1) 1e-4
-@test_approx_eq_eps Base.SparseArrays.normestinv(Aci,3) norm(inv(full(Aci)),1) 1e-4
-@test_approx_eq_eps Base.SparseArrays.normestinv(Ar) norm(inv(full(Ar)),1) 1e-4
-@test_throws ArgumentError Base.SparseArrays.normestinv(Ac,0)
-@test_throws ArgumentError Base.SparseArrays.normestinv(Ac,21)
+if Base.USE_GPL_LIBS
+    @test_approx_eq_eps Base.SparseArrays.normestinv(Ac,3) norm(inv(full(Ac)),1) 1e-4
+    @test_approx_eq_eps Base.SparseArrays.normestinv(Aci,3) norm(inv(full(Aci)),1) 1e-4
+    @test_approx_eq_eps Base.SparseArrays.normestinv(Ar) norm(inv(full(Ar)),1) 1e-4
+    @test_throws ArgumentError Base.SparseArrays.normestinv(Ac,0)
+    @test_throws ArgumentError Base.SparseArrays.normestinv(Ac,21)
+end
 @test_throws DimensionMismatch Base.SparseArrays.normestinv(sprand(3,5,.9))
 
 # csc_permute
@@ -1262,21 +1309,21 @@ end
 let
     A = spdiagm(rand(5)) + sprandn(5,5,0.2) + im*sprandn(5,5,0.2)
     A = A + A'
-    @test abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(full(A))))
+    @test !Base.USE_GPL_LIBS || abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(full(A))))
     A = spdiagm(rand(5)) + sprandn(5,5,0.2) + im*sprandn(5,5,0.2)
     A = A*A'
-    @test abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(full(A))))
+    @test !Base.USE_GPL_LIBS || abs(det(factorize(Hermitian(A)))) ≈ abs(det(factorize(full(A))))
     A = spdiagm(rand(5)) + sprandn(5,5,0.2)
     A = A + A.'
-    @test abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(full(A))))
+    @test !Base.USE_GPL_LIBS || abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(full(A))))
     A = spdiagm(rand(5)) + sprandn(5,5,0.2)
     A = A*A.'
-    @test abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(full(A))))
+    @test !Base.USE_GPL_LIBS || abs(det(factorize(Symmetric(A)))) ≈ abs(det(factorize(full(A))))
     @test factorize(triu(A)) == triu(A)
     @test isa(factorize(triu(A)), UpperTriangular{Float64, SparseMatrixCSC{Float64, Int}})
     @test factorize(tril(A)) == tril(A)
     @test isa(factorize(tril(A)), LowerTriangular{Float64, SparseMatrixCSC{Float64, Int}})
-    @test factorize(A[:,1:4])\ones(size(A,1)) ≈ full(A[:,1:4])\ones(size(A,1))
+    @test !Base.USE_GPL_LIBS || factorize(A[:,1:4])\ones(size(A,1)) ≈ full(A[:,1:4])\ones(size(A,1))
     @test_throws ErrorException chol(A)
     @test_throws ErrorException lu(A)
     @test_throws ErrorException eig(A)
@@ -1315,3 +1362,26 @@ let
     @test issparse(UpperTriangular(full(m))) == false
     @test issparse(LinAlg.UnitUpperTriangular(full(m))) == false
 end
+
+let
+    m = sprand(Float32, 10, 10, 0.1)
+    @test eltype(m) == Float32
+    m = sprand(Float64, 10, 10, 0.1)
+    @test eltype(m) == Float64
+    m = sprand(Int32, 10, 10, 0.1)
+    @test eltype(m) == Int32
+end
+
+# 16073
+@inferred sprand(1, 1, 1.0)
+@inferred sprand(1, 1, 1.0, rand, Float64)
+@inferred sprand(1, 1, 1.0, x->round(Int,rand(x)*100))
+
+# dense sparse concatenation -> sparse return type
+@test issparse([sprand(10,10,.1) rand(10,10)])
+@test issparse([sprand(10,10,.1); rand(10,10)])
+@test issparse([sprand(10,10,.1) rand(10,10); rand(10,10) rand(10,10)])
+# ---
+@test !issparse([rand(10,10)  rand(10,10)])
+@test !issparse([rand(10,10); rand(10,10)])
+@test !issparse([rand(10,10)  rand(10,10); rand(10,10) rand(10,10)])

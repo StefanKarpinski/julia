@@ -14,7 +14,7 @@ type Channel{T} <: AbstractChannel
 
     function Channel(sz)
         sz_max = sz == typemax(Int) ? typemax(Int) - 1 : sz
-        new(Condition(), Condition(), :open, Array(T, 0), sz_max)
+        new(Condition(), Condition(), :open, Array{T}(0), sz_max)
     end
 end
 
@@ -24,7 +24,7 @@ closed_exception() = InvalidStateException("Channel is closed.", :closed)
 function close(c::Channel)
     c.state = :closed
     notify_error(c::Channel, closed_exception())
-    c
+    nothing
 end
 isopen(c::Channel) = (c.state == :open)
 

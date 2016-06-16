@@ -7,9 +7,10 @@
 @test length([1, 2, 3]) == 3
 @test countnz([1, 2, 3]) == 3
 
-a = ones(4)
-b = a+a
-@test b[1]==2. && b[2]==2. && b[3]==2. && b[4]==2.
+let a = ones(4), b = a+a, c = a-a
+    @test b[1] === 2. && b[2] === 2. && b[3] === 2. && b[4] === 2.
+    @test c[1] === 0. && c[2] === 0. && c[3] === 0. && c[4] === 0.
+end
 
 @test length((1,)) == 1
 @test length((1,2)) == 2
@@ -58,7 +59,7 @@ a[[1 2], 1] = 0
 a[:, [1 2]] = 2
 @test a == 2ones(2,2)
 
-a = Array(Float64, 2, 2, 2, 2, 2)
+a = Array{Float64}(2, 2, 2, 2, 2)
 a[1,1,1,1,1] = 10
 a[1,2,1,1,2] = 20
 a[1,1,2,2,1] = 30
@@ -86,6 +87,71 @@ a = reshape(b, (2, 2, 2, 2, 2))
 @test ndims(a) == 5
 @test a[2,1,2,2,1] == b[14]
 @test a[2,2,2,2,2] == b[end]
+
+a = collect(reshape(1:5, 1, 5))
+# reshaping linearfast SubArrays
+s = sub(a, :, 2:4)
+r = reshape(s, (length(s),))
+@test length(r) == 3
+@test r[1] == 2
+@test r[3,1] == 4
+@test r[Base.ReshapedIndex(CartesianIndex((1,2)))] == 3
+@test parent(reshape(r, (1,3))) === r.parent === s
+@test parentindexes(r) == (1:1, 1:3)
+@test reshape(r, (3,)) === r
+@test convert(Array{Int,1}, r) == [2,3,4]
+@test_throws MethodError convert(Array{Int,2}, r)
+@test convert(Array{Int}, r) == [2,3,4]
+@test Base.unsafe_convert(Ptr{Int}, r) == Base.unsafe_convert(Ptr{Int}, s)
+
+# reshaping linearslow SubArrays
+s = sub(a, :, [2,3,5])
+r = reshape(s, length(s))
+@test length(r) == 3
+@test r[1] == 2
+@test r[3,1] == 5
+@test r[Base.ReshapedIndex(CartesianIndex((1,2)))] == 3
+@test parent(reshape(r, (1,3))) === r.parent === s
+@test parentindexes(r) == (1:1, 1:3)
+@test reshape(r, (3,)) === r
+@test convert(Array{Int,1}, r) == [2,3,5]
+@test_throws MethodError convert(Array{Int,2}, r)
+@test convert(Array{Int}, r) == [2,3,5]
+@test_throws ErrorException Base.unsafe_convert(Ptr{Int}, r)
+r[2] = -1
+@test a[3] == -1
+a = zeros(0, 5)  # an empty linearslow array
+s = sub(a, :, [2,3,5])
+@test length(reshape(s, length(s))) == 0
+
+@test reshape(1:5, (5,)) === 1:5
+@test reshape(1:5, 5) === 1:5
+
+# setindex! on a reshaped range
+a = reshape(1:20, 5, 4)
+for idx in ((3,), (2,2), (Base.ReshapedIndex(1),))
+    try
+        a[idx...] = 7
+        error("wrong error")
+    catch err
+        @test err.msg == "indexed assignment fails for a reshaped range; consider calling collect"
+    end
+end
+
+# operations with LinearFast ReshapedArray
+b = collect(1:12)
+a = Base.ReshapedArray(b, (4,3), ())
+@test a[3,2] == 7
+@test a[6] == 6
+a[3,2] = -2
+a[6] = -3
+a[Base.ReshapedIndex(5)] = -4
+@test b[5] == -4
+@test b[6] == -3
+@test b[7] == -2
+b = reinterpret(Int, a, (3,4))
+b[1] = -1
+@test vec(b) == vec(a)
 
 a = rand(1, 1, 8, 8, 1)
 @test @inferred(squeeze(a, 1)) == @inferred(squeeze(a, (1,))) == reshape(a, (1, 8, 8, 1))
@@ -239,15 +305,13 @@ for i = 1:length(X) @test X[i] === Y[i] end
 
 _array_equiv(a,b) = eltype(a) == eltype(b) && a == b
 @test _array_equiv(UInt8[1:3;4], [0x1,0x2,0x3,0x4])
-if !Base._oldstyle_array_vcat_
-    @test_throws MethodError UInt8[1:3]
-    @test_throws MethodError UInt8[1:3,]
-    @test_throws MethodError UInt8[1:3,4:6]
-    a = Array(UnitRange{Int},1); a[1] = 1:3
-    @test _array_equiv([1:3,], a)
-    a = Array(UnitRange{Int},2); a[1] = 1:3; a[2] = 4:6
-    @test _array_equiv([1:3,4:6], a)
-end
+@test_throws MethodError UInt8[1:3]
+@test_throws MethodError UInt8[1:3,]
+@test_throws MethodError UInt8[1:3,4:6]
+a = Array{UnitRange{Int}}(1); a[1] = 1:3
+@test _array_equiv([1:3,], a)
+a = Array{UnitRange{Int}}(2); a[1] = 1:3; a[2] = 4:6
+@test _array_equiv([1:3,4:6], a)
 
 # typed hvcat
 let X = Float64[1 2 3; 4 5 6]
@@ -298,6 +362,15 @@ a = [0,1,2,3,0,1,2,3]
 @test findprev(a,1,8) == 6
 @test findprev(isodd, [2,4,5,3,9,2,0], 7) == 5
 @test findprev(isodd, [2,4,5,3,9,2,0], 2) == 0
+
+# find with general iterables
+s = "julia"
+# FIXME once 16269 is resolved
+# @test find(s) == [1,2,3,4,5]
+@test find(c -> c == 'l', s) == [3]
+g = graphemes("日本語")
+@test find(g) == [1,2,3]
+@test find(isascii, g) == Int[]
 
 ## findn ##
 
@@ -367,6 +440,14 @@ p = permutedims(s, [2,1])
 @test p[1,1]==a[2,2] && p[1,2]==a[3,2]
 @test p[2,1]==a[2,3] && p[2,2]==a[3,3]
 
+# of a non-strided subarray
+a = reshape(1:60, 3, 4, 5)
+s = sub(a,:,[1,2,4],[1,5])
+c = convert(Array, s)
+for p in ([1,2,3], [1,3,2], [2,1,3], [2,3,1], [3,1,2], [3,2,1])
+    @test permutedims(s, p) == permutedims(c, p)
+end
+
 ## ipermutedims ##
 
 tensors = Any[rand(1,2,3,4),rand(2,2,2,2),rand(5,6,5,6),rand(1,1,1,1)]
@@ -421,53 +502,86 @@ let
     @test isequal(cumsum(A,2),A2)
     @test isequal(cumsum(A,3),A3)
 
-    R = repeat([1, 2], inner = [1], outer = [1])
+    R = repeat([1, 2])
     @test R == [1, 2]
-    R = repeat([1, 2], inner = [2], outer = [1])
+    R = repeat([1, 2], inner=1)
+    @test R == [1, 2]
+    R = repeat([1, 2], outer=1)
+    @test R == [1, 2]
+    R = repeat([1, 2], inner=(1,))
+    @test R == [1, 2]
+    R = repeat([1, 2], outer=(1,))
+    @test R == [1, 2]
+    R = repeat([1, 2], inner=[1])
+    @test R == [1, 2]
+    R = repeat([1, 2], outer=[1])
+    @test R == [1, 2]
+    R = repeat([1, 2], inner=1, outer=1)
+    @test R == [1, 2]
+    R = repeat([1, 2], inner=(1,), outer=(1,))
+    @test R == [1, 2]
+    R = repeat([1, 2], inner=[1], outer=[1])
+    @test R == [1, 2]
+
+    R = repeat([1, 2], inner=2)
     @test R == [1, 1, 2, 2]
-    R = repeat([1, 2], inner = [1], outer = [2])
+    R = repeat([1, 2], outer=2)
     @test R == [1, 2, 1, 2]
-    R = repeat([1, 2], inner = [2], outer = [2])
+    R = repeat([1, 2], inner=(2,))
+    @test R == [1, 1, 2, 2]
+    R = repeat([1, 2], outer=(2,))
+    @test R == [1, 2, 1, 2]
+    R = repeat([1, 2], inner=[2])
+    @test R == [1, 1, 2, 2]
+    R = repeat([1, 2], outer=[2])
+    @test R == [1, 2, 1, 2]
+
+    R = repeat([1, 2], inner=2, outer=2)
     @test R == [1, 1, 2, 2, 1, 1, 2, 2]
-    R = repeat([1, 2], inner = [1, 1], outer = [1, 1])
+    R = repeat([1, 2], inner=(2,), outer=(2,))
+    @test R == [1, 1, 2, 2, 1, 1, 2, 2]
+    R = repeat([1, 2], inner=[2], outer=[2])
+    @test R == [1, 1, 2, 2, 1, 1, 2, 2]
+
+    R = repeat([1, 2], inner = (1, 1), outer = (1, 1))
     @test R == [1, 2]''
-    R = repeat([1, 2], inner = [2, 1], outer = [1, 1])
+    R = repeat([1, 2], inner = (2, 1), outer = (1, 1))
     @test R == [1, 1, 2, 2]''
-    R = repeat([1, 2], inner = [1, 2], outer = [1, 1])
+    R = repeat([1, 2], inner = (1, 2), outer = (1, 1))
     @test R == [1 1; 2 2]
-    R = repeat([1, 2], inner = [1, 1], outer = [2, 1])
+    R = repeat([1, 2], inner = (1, 1), outer = (2, 1))
     @test R == [1, 2, 1, 2]''
-    R = repeat([1, 2], inner = [1, 1], outer = [1, 2])
+    R = repeat([1, 2], inner = (1, 1), outer = (1, 2))
     @test R == [1 1; 2 2]
 
     R = repeat([1 2;
-                3 4], inner = [1, 1], outer = [1, 1])
+                3 4], inner = (1, 1), outer = (1, 1))
     @test R == [1 2;
                   3 4]
     R = repeat([1 2;
-                3 4], inner = [1, 1], outer = [2, 1])
+                3 4], inner = (1, 1), outer = (2, 1))
     @test R == [1 2;
                   3 4;
                   1 2;
                   3 4]
     R = repeat([1 2;
-                3 4], inner = [1, 1], outer = [1, 2])
+                3 4], inner = (1, 1), outer = (1, 2))
     @test R == [1 2 1 2;
                   3 4 3 4]
     R = repeat([1 2;
-                3 4], inner = [1, 1], outer = [2, 2])
+                3 4], inner = (1, 1), outer = (2, 2))
     @test R == [1 2 1 2;
                   3 4 3 4;
                   1 2 1 2;
                   3 4 3 4]
     R = repeat([1 2;
-                3 4], inner = [2, 1], outer = [1, 1])
+                3 4], inner = (2, 1), outer = (1, 1))
     @test R == [1 2;
                   1 2;
                   3 4;
                   3 4]
     R = repeat([1 2;
-                3 4], inner = [2, 1], outer = [2, 1])
+                3 4], inner = (2, 1), outer = (2, 1))
     @test R == [1 2;
                   1 2;
                   3 4;
@@ -477,13 +591,13 @@ let
                   3 4;
                   3 4]
     R = repeat([1 2;
-                3 4], inner = [2, 1], outer = [1, 2])
+                3 4], inner = (2, 1), outer = (1, 2))
     @test R == [1 2 1 2;
                   1 2 1 2;
                   3 4 3 4;
                   3 4 3 4;]
     R = repeat([1 2;
-                3 4], inner = [2, 1], outer = [2, 2])
+                3 4], inner = (2, 1), outer = (2, 2))
     @test R == [1 2 1 2;
                   1 2 1 2;
                   3 4 3 4;
@@ -493,49 +607,49 @@ let
                   3 4 3 4;
                   3 4 3 4]
     R = repeat([1 2;
-                3 4], inner = [1, 2], outer = [1, 1])
+                3 4], inner = (1, 2), outer = (1, 1))
     @test R == [1 1 2 2;
                   3 3 4 4]
     R = repeat([1 2;
-                3 4], inner = [1, 2], outer = [2, 1])
+                3 4], inner = (1, 2), outer = (2, 1))
     @test R == [1 1 2 2;
                   3 3 4 4;
                   1 1 2 2;
                   3 3 4 4]
     R = repeat([1 2;
-                3 4], inner = [1, 2], outer = [1, 2])
+                3 4], inner = (1, 2), outer = (1, 2))
     @test R == [1 1 2 2 1 1 2 2;
                   3 3 4 4 3 3 4 4]
     R = repeat([1 2;
-                3 4], inner = [1, 2], outer = [2, 2])
+                3 4], inner = (1, 2), outer = (2, 2))
     @test R == [1 1 2 2 1 1 2 2;
                   3 3 4 4 3 3 4 4;
                   1 1 2 2 1 1 2 2;
                   3 3 4 4 3 3 4 4]
     R = repeat([1 2;
-                3 4], inner = [2, 2], outer = [1, 1])
+                3 4], inner = (2, 2), outer = [1, 1])
     @test R == [1 1 2 2;
-                  1 1 2 2;
-                  3 3 4 4;
-                  3 3 4 4]
-    R = repeat([1 2;
-                3 4], inner = [2, 2], outer = [2, 1])
-    @test R == [1 1 2 2;
-                  1 1 2 2;
-                  3 3 4 4;
-                  3 3 4 4;
-                  1 1 2 2;
                   1 1 2 2;
                   3 3 4 4;
                   3 3 4 4]
     R = repeat([1 2;
-                3 4], inner = [2, 2], outer = [1, 2])
+                3 4], inner = (2, 2), outer = (2, 1))
+    @test R == [1 1 2 2;
+                  1 1 2 2;
+                  3 3 4 4;
+                  3 3 4 4;
+                  1 1 2 2;
+                  1 1 2 2;
+                  3 3 4 4;
+                  3 3 4 4]
+    R = repeat([1 2;
+                3 4], inner = (2, 2), outer = (1, 2))
     @test R == [1 1 2 2 1 1 2 2;
                   1 1 2 2 1 1 2 2;
                   3 3 4 4 3 3 4 4;
                   3 3 4 4 3 3 4 4]
     R = repeat([1 2;
-                3 4], inner = [2, 2], outer = [2, 2])
+                3 4], inner = (2, 2), outer = (2, 2))
     @test R == [1 1 2 2 1 1 2 2;
                   1 1 2 2 1 1 2 2;
                   3 3 4 4 3 3 4 4;
@@ -544,17 +658,25 @@ let
                   1 1 2 2 1 1 2 2;
                   3 3 4 4 3 3 4 4;
                   3 3 4 4 3 3 4 4]
+    @test_throws ArgumentError repeat([1 2;
+                                       3 4], inner=2, outer=(2, 2))
+    @test_throws ArgumentError repeat([1 2;
+                                       3 4], inner=(2, 2), outer=2)
+    @test_throws ArgumentError repeat([1 2;
+                                       3 4], inner=(2,), outer=(2, 2))
+    @test_throws ArgumentError repeat([1 2;
+                                       3 4], inner=(2, 2), outer=(2,))
 
     A = reshape(1:8, 2, 2, 2)
-    R = repeat(A, inner = [1, 1, 2], outer = [1, 1, 1])
+    R = repeat(A, inner = (1, 1, 2), outer = (1, 1, 1))
     T = reshape([1:4; 1:4; 5:8; 5:8], 2, 2, 4)
     @test R == T
-    A = Array(Int, 2, 2, 2)
+    A = Array{Int}(2, 2, 2)
     A[:, :, 1] = [1 2;
                   3 4]
     A[:, :, 2] = [5 6;
                   7 8]
-    R = repeat(A, inner = [2, 2, 2], outer = [2, 2, 2])
+    R = repeat(A, inner = (2, 2, 2), outer = (2, 2, 2))
     @test R[1, 1, 1] == 1
     @test R[2, 2, 2] == 1
     @test R[3, 3, 3] == 8
@@ -563,6 +685,19 @@ let
     @test R[6, 6, 6] == 1
     @test R[7, 7, 7] == 8
     @test R[8, 8, 8] == 8
+
+    R = repeat(1:2)
+    @test R == [1, 2]
+    R = repeat(1:2, inner=1)
+    @test R == [1, 2]
+    R = repeat(1:2, inner=2)
+    @test R == [1, 1, 2, 2]
+    R = repeat(1:2, outer=1)
+    @test R == [1, 2]
+    R = repeat(1:2, outer=2)
+    @test R == [1, 2, 1, 2]
+    R = repeat(1:2, inner=(3,), outer=(2,))
+    @test R == [1, 1, 1, 2, 2, 2, 1, 1, 1, 2, 2, 2]
 
     A = rand(4,4)
     for s in Any[A[1:2:4, 1:2:4], sub(A, 1:2:4, 1:2:4)]
@@ -601,7 +736,6 @@ let
     @test isequal(c[1,:], cv2)
     @test isequal(c[3,:], cv)
     @test isequal(c[:,4], [2.0,2.0,2.0,2.0]*1000)
-
 end
 
 @test (1:5)[[true,false,true,false,true]] == [1,3,5]
@@ -672,13 +806,9 @@ B = cat(3, 1, 2, 3)
 let
     local a,h,i
     a = rand(5,5)
-    h = mapslices(v -> hist(v,0:0.1:1)[2], a, 1)
-    H = mapslices(v -> hist(v,0:0.1:1)[2], a, 2)
     s = mapslices(sort, a, [1])
     S = mapslices(sort, a, [2])
     for i = 1:5
-        @test h[:,i] == hist(a[:,i],0:0.1:1)[2]
-        @test vec(H[i,:]) == hist(vec(a[i,:]),0:0.1:1)[2]
         @test s[:,i] == sort(a[:,i])
         @test vec(S[i,:]) == sort(vec(a[i,:]))
     end
@@ -800,7 +930,7 @@ let
 end
 
 # fill
-@test fill!(Array(Float64,1),-0.0)[1] === -0.0
+@test fill!(Array{Float64}(1),-0.0)[1] === -0.0
 A = ones(3,3)
 S = sub(A, 2, 1:3)
 fill!(S, 2)
@@ -809,11 +939,11 @@ fill!(S, 3)
 @test A == [1 1 3; 2 2 3; 1 1 1]
 rt = Base.return_types(fill!, Tuple{Array{Int32, 3}, UInt8})
 @test length(rt) == 1 && rt[1] == Array{Int32, 3}
-A = Array(Union{UInt8,Int8}, 3)
+A = Array{Union{UInt8,Int8}}(3)
 fill!(A, UInt8(3))
 @test A == [0x03, 0x03, 0x03]
 # Issue #9964
-A = Array(Vector{Float64}, 2)
+A = Array{Vector{Float64}}(2)
 fill!(A, [1, 2])
 @test A[1] == [1, 2]
 @test A[1] === A[2]
@@ -890,7 +1020,7 @@ end
 @test isequal(flipdim(1:10, 1), 10:-1:1)
 @test isequal(flipdim(1:10, 2), 1:10)
 @test_throws ArgumentError flipdim(1:10, -1)
-@test isequal(flipdim(Array(Int,0,0),1), Array(Int,0,0))  # issue #5872
+@test isequal(flipdim(Array{Int}(0,0),1), Array{Int}(0,0))  # issue #5872
 
 # isdiag, istril, istriu
 @test isdiag(3)
@@ -975,13 +1105,6 @@ function i7197()
 end
 @test i7197() == (2,2)
 
-# PR #9256
-function pr9256()
-    m = [1 2 3; 4 5 6; 7 8 9]
-    ind2sub(m, 6)
-end
-@test pr9256() == (3,2)
-
 # PR #8622 and general indexin test
 function pr8622()
     x=[1,3,5,7]
@@ -991,15 +1114,15 @@ end
 @test pr8622() == [0,3,1,0]
 
 #6828 - size of specific dimensions
-a = Array(Float64, 10)
+a = Array{Float64}(10)
 @test size(a) == (10,)
 @test size(a, 1) == 10
 @test size(a,2,1) == (1,10)
-a = Array(Float64, 2,3)
+a = Array{Float64}(2,3)
 @test size(a) == (2,3)
 @test size(a,4,3,2,1) == (1,1,3,2)
 @test size(a,1,2) == (2,3)
-a = Array(Float64, 9,8,7,6,5,4,3,2,1)
+a = Array{Float64}(9,8,7,6,5,4,3,2,1)
 @test size(a,1,1) == (9,9)
 @test size(a,4) == 6
 @test size(a,9,8,7,6,5,4,3,2,19,8,7,6,5,4,3,2,1) == (1,2,3,4,5,6,7,8,1,2,3,4,5,6,7,8,9)
@@ -1085,7 +1208,7 @@ a = ones(5,0)
 b = sub(a, :, :)
 @test mdsum(b) == 0
 
-a = reshape(1:60, 3, 4, 5)
+a = copy(reshape(1:60, 3, 4, 5))
 @test a[CartesianIndex{3}(2,3,4)] == 44
 a[CartesianIndex{3}(2,3,3)] = -1
 @test a[CartesianIndex{3}(2,3,3)] == -1
@@ -1113,6 +1236,11 @@ I2 = CartesianIndex((-1,5,2))
 @test I1 + 1 == CartesianIndex((3,4,1))
 @test I1 - 2 == CartesianIndex((0,1,-2))
 
+@test zero(CartesianIndex{2}) == CartesianIndex((0,0))
+@test zero(CartesianIndex((2,3))) == CartesianIndex((0,0))
+@test one(CartesianIndex{2}) == CartesianIndex((1,1))
+@test one(CartesianIndex((2,3))) == CartesianIndex((1,1))
+
 @test min(CartesianIndex((2,3)), CartesianIndex((5,2))) == CartesianIndex((2,2))
 @test max(CartesianIndex((2,3)), CartesianIndex((5,2))) == CartesianIndex((5,3))
 
@@ -1122,10 +1250,15 @@ I2 = CartesianIndex((-1,5,2))
 @test length(CartesianIndex{3}((1,2))) == 3
 @test length(CartesianIndex{3}(1,2,3)) == 3
 @test length(CartesianIndex{3}((1,2,3))) == 3
-@test_throws DimensionMismatch CartesianIndex{3}(1,2,3,4)
-@test_throws DimensionMismatch CartesianIndex{3}((1,2,3,4))
+@test_throws ArgumentError CartesianIndex{3}(1,2,3,4)
+@test_throws ArgumentError CartesianIndex{3}((1,2,3,4))
 
 @test length(I1) == 3
+
+@test isless(CartesianIndex((1,1)), CartesianIndex((2,1)))
+@test isless(CartesianIndex((1,1)), CartesianIndex((1,2)))
+@test isless(CartesianIndex((2,1)), CartesianIndex((1,2)))
+@test !isless(CartesianIndex((1,2)), CartesianIndex((2,1)))
 
 a = spzeros(2,3)
 @test CartesianRange(size(a)) == eachindex(a)
@@ -1213,21 +1346,21 @@ let x = fill(0.9, 1000)
 end
 
 #binary ops on bool arrays
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test A + true == [2,2,2,2,2]
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test A + false == [1,1,1,1,1]
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test true + A == [2,2,2,2,2]
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test false + A == [1,1,1,1,1]
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test A - true == [0,0,0,0,0]
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test A - false == [1,1,1,1,1]
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test true - A == [0,0,0,0,0]
-A = bitunpack(trues(5))
+A = Array(trues(5))
 @test false - A == [-1,-1,-1,-1,-1]
 
 # simple transposes
@@ -1287,9 +1420,9 @@ module RetTypeDecl
     (.*){T}(x::MeterUnits{T,1}, y::MeterUnits{T,1}) = MeterUnits{T,2}(x.val*y.val)
     zero{T,pow}(x::MeterUnits{T,pow}) = MeterUnits{T,pow}(zero(T))
 
-    Base.promote_op{R,S}(::Base.AddFun, ::Type{MeterUnits{R,1}}, ::Type{MeterUnits{S,1}}) = MeterUnits{promote_type(R,S),1}
-    Base.promote_op{R,S}(::Base.MulFun, ::Type{MeterUnits{R,1}}, ::Type{MeterUnits{S,1}}) = MeterUnits{promote_type(R,S),2}
-    Base.promote_op{R,S}(::Base.DotMulFun, ::Type{MeterUnits{R,1}}, ::Type{MeterUnits{S,1}}) = MeterUnits{promote_type(R,S),2}
+    Base.promote_op{R,S}(::typeof(+), ::Type{MeterUnits{R,1}}, ::Type{MeterUnits{S,1}}) = MeterUnits{promote_type(R,S),1}
+    Base.promote_op{R,S}(::typeof(*), ::Type{MeterUnits{R,1}}, ::Type{MeterUnits{S,1}}) = MeterUnits{promote_type(R,S),2}
+    Base.promote_op{R,S}(::typeof(.*), ::Type{MeterUnits{R,1}}, ::Type{MeterUnits{S,1}}) = MeterUnits{promote_type(R,S),2}
 
     @test @inferred(m+[m,m]) == [m+m,m+m]
     @test @inferred([m,m]+m) == [m+m,m+m]
@@ -1484,3 +1617,44 @@ end
 @test cumsum([1 2; 3 4], 1) == [1 2; 4 6]
 @test cumsum([1 2; 3 4], 2) == [1 3; 3 7]
 @test cumsum([1 2; 3 4], 3) == [1 2; 3 4]
+
+module TestNLoops15895
+
+using Base.Cartesian
+using Base.Test
+
+# issue 15894
+function f15894(d)
+    s = zero(eltype(d))
+    @nloops 1 i d begin
+        s += @nref 1 d i
+    end
+    s
+end
+@test f15894(ones(Int, 100)) == 100
+end
+
+# sign, conj, ~
+let A = [-10,0,3], B = [-10.0,0.0,3.0], C = [1,im,0]
+    @test sign(A) == [-1,0,1]
+    @test sign(B) == [-1,0,1]
+    @test typeof(sign(A)) == Vector{Int}
+    @test typeof(sign(B)) == Vector{Float64}
+
+    @test conj(A) == A
+    @test conj(B) == A
+    @test conj(C) == [1,-im,0]
+    @test typeof(conj(A)) == Vector{Int}
+    @test typeof(conj(B)) == Vector{Float64}
+    @test typeof(conj(C)) == Vector{Complex{Int}}
+
+    @test ~A == [9,-1,-4]
+    @test typeof(~A) == Vector{Int}
+end
+
+# issue #16247
+let A = zeros(3,3)
+    @test size(A[:,0x1:0x2]) == (3, 2)
+    @test size(A[:,UInt(1):UInt(2)]) == (3,2)
+    @test size(similar(A, UInt(3), 0x3)) == size(similar(A, (UInt(3), 0x3))) == (3,3)
+end

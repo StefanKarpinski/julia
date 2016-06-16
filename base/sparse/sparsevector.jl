@@ -2,16 +2,7 @@
 
 ### Common definitions
 
-import Base: Func, AddFun, MulFun, MaxFun, MinFun, SubFun, sort
-
-immutable ComplexFun <: Func{2} end
-(::ComplexFun)(x::Real, y::Real) = complex(x, y)
-
-immutable DotFun <: Func{2} end
-(::DotFun)(x::Number, y::Number) = conj(x) * y
-
-typealias UnaryOp Union{Function, Func{1}}
-typealias BinaryOp Union{Function, Func{2}}
+import Base: scalarmax, scalarmin, sort
 
 ### The SparseVector
 
@@ -64,30 +55,15 @@ function _sparsevector!{Ti<:Integer}(I::Vector{Ti}, V::Vector, len::Integer)
     SparseVector(len, I, V)
 end
 
-function _sparsevector!{Tv,Ti<:Integer}(I::Vector{Ti}, V::Vector{Tv}, len::Integer, combine::BinaryOp)
+function _sparsevector!{Tv,Ti<:Integer}(I::Vector{Ti}, V::Vector{Tv}, len::Integer, combine::Function)
     if !isempty(I)
         p = sortperm(I)
         permute!(I, p)
         permute!(V, p)
         m = length(I)
-
-        # advances to the first non-zero element
-        r = 1     # index of last processed entry
-        while r <= m
-            if V[r] == 0
-                r += 1
-            else
-                break
-            end
-        end
-        r > m && return SparseVector(len, Ti[], Tv[])
-
-        # move r-th to l-th
+        r = 1
         l = 1       # length of processed part
         i = I[r]    # row-index of current element
-        if r > 1
-            I[l] = i; V[l] = V[r]
-        end
 
         # main loop
         while r < m
@@ -97,17 +73,12 @@ function _sparsevector!{Tv,Ti<:Integer}(I::Vector{Ti}, V::Vector{Tv}, len::Integ
                 V[l] = combine(V[l], V[r])
             else  # advance l, and move r-th to l-th
                 pv = V[l]
-                if pv != 0
-                    l += 1
-                end
+                l += 1
                 i = i2
                 if l < r
                     I[l] = i; V[l] = V[r]
                 end
             end
-        end
-        if V[l] == 0
-            l -= 1
         end
         if l < m
             resize!(I, l)
@@ -125,7 +96,7 @@ Duplicates are combined using the `combine` function, which defaults to
 `+` if no `combine` argument is provided, unless the elements of `V` are Booleans
 in which case `combine` defaults to `|`.
 """
-function sparsevec{Tv,Ti<:Integer}(I::AbstractVector{Ti}, V::AbstractVector{Tv}, combine::BinaryOp)
+function sparsevec{Tv,Ti<:Integer}(I::AbstractVector{Ti}, V::AbstractVector{Tv}, combine::Function)
     length(I) == length(V) ||
         throw(ArgumentError("index and value vectors must be the same length"))
     len = 0
@@ -138,7 +109,7 @@ function sparsevec{Tv,Ti<:Integer}(I::AbstractVector{Ti}, V::AbstractVector{Tv},
     _sparsevector!(collect(Ti, I), collect(Tv, V), len, combine)
 end
 
-function sparsevec{Tv,Ti<:Integer}(I::AbstractVector{Ti}, V::AbstractVector{Tv}, len::Integer, combine::BinaryOp)
+function sparsevec{Tv,Ti<:Integer}(I::AbstractVector{Ti}, V::AbstractVector{Tv}, len::Integer, combine::Function)
     length(I) == length(V) ||
         throw(ArgumentError("index and value vectors must be the same length"))
     maxi = convert(Ti, len)
@@ -149,23 +120,23 @@ function sparsevec{Tv,Ti<:Integer}(I::AbstractVector{Ti}, V::AbstractVector{Tv},
 end
 
 sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, V::Union{Number, AbstractVector}) =
-    sparsevec(I, V, AddFun())
+    sparsevec(I, V, +)
 
 sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, V::Union{Number, AbstractVector},
     len::Integer) =
-    sparsevec(I, V, len, AddFun())
+    sparsevec(I, V, len, +)
 
 sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, V::Union{Bool, AbstractVector{Bool}}) =
-    sparsevec(I, V, OrFun())
+    sparsevec(I, V, |)
 
 sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, V::Union{Bool, AbstractVector{Bool}},
     len::Integer) =
-    sparsevec(I, V, len, OrFun())
+    sparsevec(I, V, len, |)
 
-sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, v::Number, combine::BinaryOp) =
+sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, v::Number, combine::Function) =
     sparsevec(I, fill(v, length(I)), combine)
 
-sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, v::Number, len::Integer, combine::BinaryOp) =
+sparsevec{Ti<:Integer}(I::AbstractVector{Ti}, v::Number, len::Integer, combine::Function) =
     sparsevec(I, fill(v, length(I)), len, combine)
 
 
@@ -178,8 +149,8 @@ the dictionary, and the nonzero values are the values from the dictionary.
 """
 function sparsevec{Tv,Ti<:Integer}(dict::Associative{Ti,Tv})
     m = length(dict)
-    nzind = Array(Ti, m)
-    nzval = Array(Tv, m)
+    nzind = Array{Ti}(m)
+    nzval = Array{Tv}(m)
 
     cnt = 0
     len = zero(Ti)
@@ -188,11 +159,9 @@ function sparsevec{Tv,Ti<:Integer}(dict::Associative{Ti,Tv})
         if k > len
             len = k
         end
-        if v != 0
-            cnt += 1
-            @inbounds nzind[cnt] = k
-            @inbounds nzval[cnt] = v
-        end
+        cnt += 1
+        @inbounds nzind[cnt] = k
+        @inbounds nzval[cnt] = v
     end
     resize!(nzind, cnt)
     resize!(nzval, cnt)
@@ -201,18 +170,16 @@ end
 
 function sparsevec{Tv,Ti<:Integer}(dict::Associative{Ti,Tv}, len::Integer)
     m = length(dict)
-    nzind = Array(Ti, m)
-    nzval = Array(Tv, m)
+    nzind = Array{Ti}(m)
+    nzval = Array{Tv}(m)
 
     cnt = 0
     maxk = convert(Ti, len)
     for (k, v) in dict
         1 <= k <= maxk || throw(ArgumentError("an index (key) is out of bound."))
-        if v != 0
-            cnt += 1
-            @inbounds nzind[cnt] = k
-            @inbounds nzval[cnt] = v
-        end
+        cnt += 1
+        @inbounds nzind[cnt] = k
+        @inbounds nzval[cnt] = v
     end
     resize!(nzind, cnt)
     resize!(nzval, cnt)
@@ -279,8 +246,8 @@ function _dense2sparsevec{Tv,Ti}(s::AbstractArray{Tv}, initcap::Ti)
     # pre-condition: initcap > 0; the initcap determines the index type
     n = length(s)
     cap = initcap
-    nzind = Array(Ti, cap)
-    nzval = Array(Tv, cap)
+    nzind = Array{Ti}(cap)
+    nzval = Array{Tv}(cap)
     c = 0
     @inbounds for i = 1:n
         v = s[i]
@@ -389,16 +356,15 @@ function sprand(r::AbstractRNG, n::Integer, p::AbstractFloat, rfn::Function)
     SparseVector(n, I, V)
 end
 
-sprand{T}(n::Integer, p::AbstractFloat, ::Type{T}) = sprand(GLOBAL_RNG, n, p, rand, T)
 sprand(n::Integer, p::AbstractFloat) = sprand(GLOBAL_RNG, n, p, rand)
-sprand{T}(r::AbstractRNG, n::Integer, p::AbstractFloat, ::Type{T}) = sprand(r, n, p, rand, T)
+
 sprand(r::AbstractRNG, n::Integer, p::AbstractFloat) = sprand(r, n, p, rand)
+sprand{T}(r::AbstractRNG, ::Type{T}, n::Integer, p::AbstractFloat) = sprand(r, n, p, (r, i) -> rand(r, T, i))
+sprand(r::AbstractRNG, ::Type{Bool}, n::Integer, p::AbstractFloat) = sprand(r, n, p, truebools)
+sprand{T}(::Type{T}, n::Integer, p::AbstractFloat) = sprand(GLOBAL_RNG, T, n, p)
 
 sprandn(n::Integer, p::AbstractFloat) = sprand(GLOBAL_RNG, n, p, randn)
 sprandn(r::AbstractRNG, n::Integer, p::AbstractFloat) = sprand(r, n, p, randn)
-
-sprandbool(n::Integer, p::AbstractFloat) = sprand(GLOBAL_RNG, n, p, truebools)
-sprandbool(r::AbstractRNG, n::Integer, p::AbstractFloat) = sprand(r, n, p, truebools)
 
 ## Indexing into Matrices can return SparseVectors
 
@@ -435,8 +401,8 @@ function Base.getindex{Tv,Ti}(A::SparseMatrixCSC{Tv,Ti}, i::Integer, J::Abstract
     nJ = length(J)
     colptrA = A.colptr; rowvalA = A.rowval; nzvalA = A.nzval
 
-    nzinds = Array(Ti, 0)
-    nzvals = Array(Tv, 0)
+    nzinds = Array{Ti}(0)
+    nzvals = Array{Tv}(0)
 
     # adapted from SparseMatrixCSC's sorted_bsearch_A
     ptrI = 1
@@ -469,8 +435,8 @@ function _logical_index{Tv}(A::SparseMatrixCSC{Tv}, I::AbstractArray{Bool})
     nnzB = min(n, nnz(A))
 
     colptrA = A.colptr; rowvalA = A.rowval; nzvalA = A.nzval
-    rowvalB = Array(Int, nnzB)
-    nzvalB = Array(Tv, nnzB)
+    rowvalB = Array{Int}(nnzB)
+    nzvalB = Array{Tv}(nnzB)
     c = 1
     rowB = 1
 
@@ -514,8 +480,8 @@ function getindex{Tv}(A::SparseMatrixCSC{Tv}, I::UnitRange)
 
     n = length(I)
     nnzB = min(n, nnz(A))
-    rowvalB = Array(Int, nnzB)
-    nzvalB = Array(Tv, nnzB)
+    rowvalB = Array{Int}(nnzB)
+    nzvalB = Array{Tv}(nnzB)
 
     rowstart,colstart = ind2sub(szA, first(I))
     rowend,colend = ind2sub(szA, last(I))
@@ -549,8 +515,8 @@ function getindex{Tv}(A::SparseMatrixCSC{Tv}, I::AbstractVector)
 
     n = length(I)
     nnzB = min(n, nnz(A))
-    rowvalB = Array(Int, nnzB)
-    nzvalB = Array(Tv, nnzB)
+    rowvalB = Array{Int}(nnzB)
+    nzvalB = Array{Tv}(nnzB)
 
     idxB = 1
     for i in 1:n
@@ -610,8 +576,8 @@ function getindex{Tv,Ti}(x::AbstractSparseVector{Tv,Ti}, I::UnitRange)
     # compute the number of non-zeros
     jrgn = j0:j1
     mr = length(jrgn)
-    rind = Array(Ti, mr)
-    rval = Array(Tv, mr)
+    rind = Array{Ti}(mr)
+    rval = Array{Tv}(mr)
     if mr > 0
         c = 0
         for j in jrgn
@@ -641,26 +607,28 @@ getindex(x::AbstractSparseVector, ::Colon) = copy(x)
 
 ### show and friends
 
-function showarray(io::IO, x::AbstractSparseVector;
-                   header::Bool=true, repr=false)
-
+function show(io::IO, x::AbstractSparseVector)
     n = length(x)
     nzind = nonzeroinds(x)
     nzval = nonzeros(x)
     xnnz = length(nzind)
 
-    if header
+    if get(io, :multiline, false)
         println(io, summary(x))
     end
 
-    limit::Bool = Base.limit_output(io)
+    limit::Bool = get(io, :limit, false)
     half_screen_rows = limit ? div(displaysize(io)[1] - 8, 2) : typemax(Int)
     pad = ndigits(n)
     sep = "\n\t"
+    io = IOContext(io, multiline=false)
+    if !haskey(io, :compact)
+        io = IOContext(io, compact=true)
+    end
     for k = 1:length(nzind)
         if k < half_screen_rows || k > xnnz - half_screen_rows
             print(io, "  ", '[', rpad(nzind[k], pad), "]  =  ")
-            Base.showcompact_lim(io, nzval[k])
+            Base.show(io, nzval[k])
             println(io)
         elseif k == half_screen_rows
             println(io, "   ", " "^pad, "   \u22ee")
@@ -669,12 +637,9 @@ function showarray(io::IO, x::AbstractSparseVector;
 end
 
 function summary(x::AbstractSparseVector)
-    string("Sparse vector of length ", length(x), ", with ", length(nonzeros(x)),
+    string("Sparse vector of length ", length(x), " with ", length(nonzeros(x)),
            " ",  eltype(x), " nonzero entries:")
 end
-
-show(io::IO, x::AbstractSparseVector) = showarray(io, x)
-writemime(io::IO, ::MIME"text/plain", x::AbstractSparseVector) = show(IOContext(io, :limit_output => true), x)
 
 ### Conversion to matrix
 
@@ -702,7 +667,7 @@ convert{Tv,Ti}(::Type{SparseMatrixCSC}, x::AbstractSparseVector{Tv,Ti}) =
 
 function full{Tv}(x::AbstractSparseVector{Tv})
     n = length(x)
-    n == 0 && return Array(Tv, 0)
+    n == 0 && return Array{Tv}(0)
     nzind = nonzeroinds(x)
     nzval = nonzeros(x)
     r = zeros(Tv, n)
@@ -745,9 +710,9 @@ function hcat{Tv,Ti}(X::AbstractSparseVector{Tv,Ti}...)
     end
 
     # construction
-    colptr = Array(Ti, n+1)
-    nzrow = Array(Ti, tnnz)
-    nzval = Array(Tv, tnnz)
+    colptr = Array{Ti}(n+1)
+    nzrow = Array{Ti}(tnnz)
+    nzval = Array{Tv}(tnnz)
     roff = 1
     @inbounds for j = 1:n
         xj = X[j]
@@ -771,8 +736,8 @@ function vcat{Tv,Ti}(X::AbstractSparseVector{Tv,Ti}...)
     end
 
     # construction
-    rnzind = Array(Ti, tnnz)
-    rnzval = Array(Tv, tnnz)
+    rnzind = Array{Ti}(tnnz)
+    rnzval = Array{Tv}(tnnz)
     ir = 0
     len = 0
     @inbounds for j = 1:n
@@ -789,6 +754,11 @@ function vcat{Tv,Ti}(X::AbstractSparseVector{Tv,Ti}...)
     end
     SparseVector(len, rnzind, rnzval)
 end
+
+hcat(Xin::Union{AbstractSparseVector, SparseMatrixCSC}...) = hcat(map(SparseMatrixCSC, Xin)...)
+vcat(Xin::Union{AbstractSparseVector, SparseMatrixCSC}...) = vcat(map(SparseMatrixCSC, Xin)...)
+hcat(Xin::Union{Vector, AbstractSparseVector}...) = hcat(map(sparse, Xin)...)
+vcat(Xin::Union{Vector, AbstractSparseVector}...) = vcat(map(sparse, Xin)...)
 
 ### math functions
 
@@ -814,8 +784,8 @@ macro unarymap_nz2z_z2z(op, TF)
             xnzval = nonzeros(x)
             m = length(xnzind)
 
-            ynzind = Array(Ti, m)
-            ynzval = Array(R, m)
+            ynzind = Array{Ti}(m)
+            ynzval = Array{R}(m)
             ir = 0
             @inbounds for j = 1:m
                 i = xnzind[j]
@@ -887,7 +857,7 @@ end
 # 1: f(nz, nz) -> z/nz, f(z, nz) -> nz, f(nz, z) -> nz
 # 2: f(nz, nz) -> z/nz, f(z, nz) -> z/nz, f(nz, z) -> z/nz
 
-function _binarymap{Tx,Ty}(f::BinaryOp,
+function _binarymap{Tx,Ty}(f::Function,
                            x::AbstractSparseVector{Tx},
                            y::AbstractSparseVector{Ty},
                            mode::Int)
@@ -905,8 +875,8 @@ function _binarymap{Tx,Ty}(f::BinaryOp,
     my = length(ynzind)
     cap = (mode == 0 ? min(mx, my) : mx + my)::Int
 
-    rind = Array(Int, cap)
-    rval = Array(R, cap)
+    rind = Array{Int}(cap)
+    rval = Array{R}(cap)
     ir = 0
     ix = 1
     iy = 1
@@ -925,7 +895,7 @@ function _binarymap{Tx,Ty}(f::BinaryOp,
     return SparseVector(n, rind, rval)
 end
 
-function _binarymap_mode_0!(f::BinaryOp, mx::Int, my::Int,
+function _binarymap_mode_0!(f::Function, mx::Int, my::Int,
                             xnzind, xnzval, ynzind, ynzval, rind, rval)
     # f(nz, nz) -> nz, f(z, nz) -> z, f(nz, z) ->  z
     ir = 0; ix = 1; iy = 1
@@ -945,7 +915,7 @@ function _binarymap_mode_0!(f::BinaryOp, mx::Int, my::Int,
     return ir
 end
 
-function _binarymap_mode_1!{Tx,Ty}(f::BinaryOp, mx::Int, my::Int,
+function _binarymap_mode_1!{Tx,Ty}(f::Function, mx::Int, my::Int,
                                    xnzind, xnzval::AbstractVector{Tx},
                                    ynzind, ynzval::AbstractVector{Ty},
                                    rind, rval)
@@ -983,7 +953,7 @@ function _binarymap_mode_1!{Tx,Ty}(f::BinaryOp, mx::Int, my::Int,
     return ir
 end
 
-function _binarymap_mode_2!{Tx,Ty}(f::BinaryOp, mx::Int, my::Int,
+function _binarymap_mode_2!{Tx,Ty}(f::Function, mx::Int, my::Int,
                                    xnzind, xnzval::AbstractVector{Tx},
                                    ynzind, ynzval::AbstractVector{Ty},
                                    rind, rval)
@@ -1029,7 +999,7 @@ function _binarymap_mode_2!{Tx,Ty}(f::BinaryOp, mx::Int, my::Int,
     return ir
 end
 
-function _binarymap{Tx,Ty}(f::BinaryOp,
+function _binarymap{Tx,Ty}(f::Function,
                            x::AbstractVector{Tx},
                            y::AbstractSparseVector{Ty},
                            mode::Int)
@@ -1043,7 +1013,7 @@ function _binarymap{Tx,Ty}(f::BinaryOp,
     ynzval = nonzeros(y)
     m = length(ynzind)
 
-    dst = Array(R, n)
+    dst = Array{R}(n)
     if mode == 0
         ii = 1
         @inbounds for i = 1:m
@@ -1072,7 +1042,7 @@ function _binarymap{Tx,Ty}(f::BinaryOp,
     return dst
 end
 
-function _binarymap{Tx,Ty}(f::BinaryOp,
+function _binarymap{Tx,Ty}(f::Function,
                            x::AbstractSparseVector{Tx},
                            y::AbstractVector{Ty},
                            mode::Int)
@@ -1086,7 +1056,7 @@ function _binarymap{Tx,Ty}(f::BinaryOp,
     xnzval = nonzeros(x)
     m = length(xnzind)
 
-    dst = Array(R, n)
+    dst = Array{R}(n)
     if mode == 0
         ii = 1
         @inbounds for i = 1:m
@@ -1118,13 +1088,13 @@ end
 
 ### Binary arithmetics: +, -, *
 
-for (vop, fun, mode) in [(:_vadd, :AddFun, 1),
-                         (:_vsub, :SubFun, 1),
-                         (:_vmul, :MulFun, 0)]
+for (vop, fun, mode) in [(:_vadd, :+, 1),
+                         (:_vsub, :-, 1),
+                         (:_vmul, :*, 0)]
     @eval begin
-        $(vop)(x::AbstractSparseVector, y::AbstractSparseVector) = _binarymap($(fun)(), x, y, $mode)
-        $(vop)(x::StridedVector, y::AbstractSparseVector) = _binarymap($(fun)(), x, y, $mode)
-        $(vop)(x::AbstractSparseVector, y::StridedVector) = _binarymap($(fun)(), x, y, $mode)
+        $(vop)(x::AbstractSparseVector, y::AbstractSparseVector) = _binarymap($(fun), x, y, $mode)
+        $(vop)(x::StridedVector, y::AbstractSparseVector) = _binarymap($(fun), x, y, $mode)
+        $(vop)(x::AbstractSparseVector, y::StridedVector) = _binarymap($(fun), x, y, $mode)
     end
 end
 
@@ -1146,16 +1116,16 @@ end
 
 # definition of other binary functions
 
-for (op, fun, TF, mode) in [(:max, :MaxFun, :Real, 2),
-                            (:min, :MinFun, :Real, 2),
-                            (:complex, :ComplexFun, :Real, 1)]
+for (op, TF, mode) in [(:max, :Real, 2),
+                       (:min, :Real, 2),
+                       (:complex, :Real, 1)]
     @eval begin
         $(op){Tx<:$(TF),Ty<:$(TF)}(x::AbstractSparseVector{Tx}, y::AbstractSparseVector{Ty}) =
-            _binarymap($(fun)(), x, y, $mode)
+            _binarymap($(op), x, y, $mode)
         $(op){Tx<:$(TF),Ty<:$(TF)}(x::StridedVector{Tx}, y::AbstractSparseVector{Ty}) =
-            _binarymap($(fun)(), x, y, $mode)
+            _binarymap($(op), x, y, $mode)
         $(op){Tx<:$(TF),Ty<:$(TF)}(x::AbstractSparseVector{Tx}, y::StridedVector{Ty}) =
-            _binarymap($(fun)(), x, y, $mode)
+            _binarymap($(op), x, y, $mode)
     end
 end
 
@@ -1192,10 +1162,10 @@ vecnorm(x::AbstractSparseVector, p::Real=2) = vecnorm(nonzeros(x), p)
 
 # Transpose
 # (The only sparse matrix structure in base is CSC, so a one-row sparse matrix is worse than dense)
-transpose(x::SparseVector) = _ct(IdFun(), x)
-ctranspose(x::SparseVector) = _ct(ConjFun(), x)
+transpose(x::SparseVector) = _ct(identity, x)
+ctranspose(x::SparseVector) = _ct(conj, x)
 function _ct{T}(f, x::SparseVector{T})
-    isempty(x) && return Array(T, 1, 0)
+    isempty(x) && return Array{T}(1, 0)
     A = zeros(T, 1, length(x))
     xnzind = nonzeroinds(x)
     xnzval = nonzeros(x)
@@ -1277,7 +1247,7 @@ function dot{Tx<:Number,Ty<:Number}(x::AbstractSparseVector{Tx}, y::AbstractVect
     return s
 end
 
-function _spdot(f::BinaryOp,
+function _spdot(f::Function,
                 xj::Int, xj_last::Int, xnzind, xnzval,
                 yj::Int, yj_last::Int, ynzind, ynzval)
     # dot product between ranges of non-zeros,
@@ -1308,7 +1278,7 @@ function dot{Tx<:Number,Ty<:Number}(x::AbstractSparseVector{Tx}, y::AbstractSpar
     xnzval = nonzeros(x)
     ynzval = nonzeros(y)
 
-    _spdot(DotFun(),
+    _spdot(dot,
            1, length(xnzind), xnzind, xnzval,
            1, length(ynzind), ynzind, ynzval)
 end
@@ -1322,7 +1292,7 @@ function *{Ta,Tx}(A::StridedMatrix{Ta}, x::AbstractSparseVector{Tx})
     m, n = size(A)
     length(x) == n || throw(DimensionMismatch())
     Ty = promote_type(Ta, Tx)
-    y = Array(Ty, m)
+    y = Array{Ty}(m)
     A_mul_B!(y, A, x)
 end
 
@@ -1359,7 +1329,7 @@ function At_mul_B{Ta,Tx}(A::StridedMatrix{Ta}, x::AbstractSparseVector{Tx})
     m, n = size(A)
     length(x) == m || throw(DimensionMismatch())
     Ty = promote_type(Ta, Tx)
-    y = Array(Ty, n)
+    y = Array{Ty}(n)
     At_mul_B!(y, A, x)
 end
 
@@ -1407,7 +1377,7 @@ function densemv(A::SparseMatrixCSC, x::AbstractSparseVector; trans::Char='N')
     end
     xlen == length(x) || throw(DimensionMismatch())
     T = promote_type(eltype(A), eltype(x))
-    y = Array(T, ylen)
+    y = Array{T}(ylen)
     if trans == 'N' || trans == 'N'
         A_mul_B!(y, A, x)
     elseif trans == 'T' || trans == 't'
@@ -1459,15 +1429,15 @@ At_mul_B!{Tx,Ty}(y::StridedVector{Ty}, A::SparseMatrixCSC, x::AbstractSparseVect
     At_mul_B!(one(Tx), A, x, zero(Ty), y)
 
 At_mul_B!{Tx,Ty}(α::Number, A::SparseMatrixCSC, x::AbstractSparseVector{Tx}, β::Number, y::StridedVector{Ty}) =
-    _At_or_Ac_mul_B!(MulFun(), α, A, x, β, y)
+    _At_or_Ac_mul_B!(*, α, A, x, β, y)
 
 Ac_mul_B!{Tx,Ty}(y::StridedVector{Ty}, A::SparseMatrixCSC, x::AbstractSparseVector{Tx}) =
     Ac_mul_B!(one(Tx), A, x, zero(Ty), y)
 
 Ac_mul_B!{Tx,Ty}(α::Number, A::SparseMatrixCSC, x::AbstractSparseVector{Tx}, β::Number, y::StridedVector{Ty}) =
-    _At_or_Ac_mul_B!(DotFun(), α, A, x, β, y)
+    _At_or_Ac_mul_B!(dot, α, A, x, β, y)
 
-function _At_or_Ac_mul_B!{Tx,Ty}(tfun::BinaryOp,
+function _At_or_Ac_mul_B!{Tx,Ty}(tfun::Function,
                                  α::Number, A::SparseMatrixCSC, x::AbstractSparseVector{Tx},
                                  β::Number, y::StridedVector{Ty})
     m, n = size(A)
@@ -1504,12 +1474,12 @@ function *(A::SparseMatrixCSC, x::AbstractSparseVector)
 end
 
 At_mul_B(A::SparseMatrixCSC, x::AbstractSparseVector) =
-    _At_or_Ac_mul_B(MulFun(), A, x)
+    _At_or_Ac_mul_B(*, A, x)
 
 Ac_mul_B(A::SparseMatrixCSC, x::AbstractSparseVector) =
-    _At_or_Ac_mul_B(DotFun(), A, x)
+    _At_or_Ac_mul_B(dot, A, x)
 
-function _At_or_Ac_mul_B{TvA,TiA,TvX,TiX}(tfun::BinaryOp, A::SparseMatrixCSC{TvA,TiA}, x::AbstractSparseVector{TvX,TiX})
+function _At_or_Ac_mul_B{TvA,TiA,TvX,TiX}(tfun::Function, A::SparseMatrixCSC{TvA,TiA}, x::AbstractSparseVector{TvX,TiX})
     m, n = size(A)
     length(x) == m || throw(DimensionMismatch())
     Tv = promote_type(TvA, TvX)
@@ -1522,8 +1492,8 @@ function _At_or_Ac_mul_B{TvA,TiA,TvX,TiX}(tfun::BinaryOp, A::SparseMatrixCSC{TvA
     Anzval = A.nzval
     mx = length(xnzind)
 
-    ynzind = Array(Ti, n)
-    ynzval = Array(Tv, n)
+    ynzind = Array{Ti}(n)
+    ynzval = Array{Tv}(n)
 
     jr = 0
     for j = 1:n
@@ -1550,7 +1520,7 @@ end
 for isunittri in (true, false), islowertri in (true, false)
     unitstr = isunittri ? "Unit" : ""
     halfstr = islowertri ? "Lower" : "Upper"
-    tritype = :(Base.LinAlg.$(symbol(string(unitstr, halfstr, "Triangular"))))
+    tritype = :(Base.LinAlg.$(Symbol(unitstr, halfstr, "Triangular")))
 
     # build out-of-place left-division operations
     for (istrans, func, ipfunc) in (
@@ -1559,7 +1529,7 @@ for isunittri in (true, false), islowertri in (true, false)
         (true,  :(Ac_ldiv_B), :(Ac_ldiv_B!)) )
 
         # broad method where elements are Numbers
-        @eval function ($func){TA<:Number,Tb<:Number,S}(A::$tritype{TA,S}, b::SparseVector{Tb})
+        @eval function ($func){TA<:Number,Tb<:Number,S<:AbstractMatrix}(A::$tritype{TA,S}, b::SparseVector{Tb})
             TAb = $(isunittri ?
                 :(typeof(zero(TA)*zero(Tb) + zero(TA)*zero(Tb))) :
                 :(typeof((zero(TA)*zero(Tb) + zero(TA)*zero(Tb))/one(TA))) )
@@ -1573,19 +1543,22 @@ for isunittri in (true, false), islowertri in (true, false)
                 :(typeof(zero(TA)*zero(Tb) + zero(TA)*zero(Tb))) :
                 :(typeof((zero(TA)*zero(Tb) + zero(TA)*zero(Tb))/one(TA))) )
             r = convert(Array{TAb}, b)
-            # this operation involves only b[nzrange], so we extract
-            # and operate on solely that section for efficiency
-            nzrange = $( (islowertri && !istrans) || (!islowertri && istrans) ?
-                :(b.nzind[1]:b.n) :
-                :(1:b.nzind[end]) )
-            nzrangeviewr = sub(r, nzrange)
-            nzrangeviewA = $tritype(sub(A.data, nzrange, nzrange))
-            ($ipfunc)(convert(AbstractArray{TAb}, nzrangeviewA), nzrangeviewr)
+            # If b has no nonzero entries, then r is necessarily zero. If b has nonzero
+            # entries, then the operation involves only b[nzrange], so we extract and
+            # operate on solely b[nzrange] for efficiency.
+            if nnz(b) != 0
+                nzrange = $( (islowertri && !istrans) || (!islowertri && istrans) ?
+                    :(b.nzind[1]:b.n) :
+                    :(1:b.nzind[end]) )
+                nzrangeviewr = sub(r, nzrange)
+                nzrangeviewA = $tritype(sub(A.data, nzrange, nzrange))
+                ($ipfunc)(convert(AbstractArray{TAb}, nzrangeviewA), nzrangeviewr)
+            end
             r
         end
 
         # fallback where elements are not Numbers
-        @eval ($func){TA,Tb,S}(A::$tritype{TA,S}, b::SparseVector{Tb}) = ($ipfunc)(A, copy(b))
+        @eval ($func)(A::$tritype, b::SparseVector) = ($ipfunc)(A, copy(b))
     end
 
     # build in-place left-division operations
@@ -1598,22 +1571,26 @@ for isunittri in (true, false), islowertri in (true, false)
         # we can achieve greater efficiency where the triangular matrix provides
         # good view support. hence the StridedMatrix restriction.
         @eval function ($func){TA,Tb,S<:StridedMatrix}(A::$tritype{TA,S}, b::SparseVector{Tb})
-            # densify the relevant part of b in one shot rather
-            # than potentially repeatedly reallocating during the solve
-            $( (islowertri && !istrans) || (!islowertri && istrans) ?
-                :(_densifyfirstnztoend!(b)) :
-                :(_densifystarttolastnz!(b)) )
-            # this operation involves only the densified section, so
-            # for efficiency we extract and operate on solely that section
-            # furthermore we operate on that section as a dense vector
-            # such that dispatch has a chance to exploit, e.g., tuned BLAS
-            nzrange = $( (islowertri && !istrans) || (!islowertri && istrans) ?
-                :(b.nzind[1]:b.n) :
-                :(1:b.nzind[end]) )
-            nzrangeviewbnz = sub(b.nzval, nzrange - b.nzind[1] + 1)
-            nzrangeviewA = $tritype(sub(A.data, nzrange, nzrange))
-            ($func)(nzrangeviewA, nzrangeviewbnz)
-            # could strip any miraculous zeros here perhaps
+            # If b has no nonzero entries, the result is necessarily zero and this call
+            # reduces to a no-op. If b has nonzero entries, then...
+            if nnz(b) != 0
+                # densify the relevant part of b in one shot rather
+                # than potentially repeatedly reallocating during the solve
+                $( (islowertri && !istrans) || (!islowertri && istrans) ?
+                    :(_densifyfirstnztoend!(b)) :
+                    :(_densifystarttolastnz!(b)) )
+                # this operation involves only the densified section, so
+                # for efficiency we extract and operate on solely that section
+                # furthermore we operate on that section as a dense vector
+                # such that dispatch has a chance to exploit, e.g., tuned BLAS
+                nzrange = $( (islowertri && !istrans) || (!islowertri && istrans) ?
+                    :(b.nzind[1]:b.n) :
+                    :(1:b.nzind[end]) )
+                nzrangeviewbnz = sub(b.nzval, nzrange - b.nzind[1] + 1)
+                nzrangeviewA = $tritype(sub(A.data, nzrange, nzrange))
+                ($func)(nzrangeviewA, nzrangeviewbnz)
+                # could strip any miraculous zeros here perhaps
+            end
             b
         end
     end
@@ -1677,4 +1654,80 @@ function sort{Tv,Ti}(x::SparseVector{Tv,Ti}; kws...)
     newnzind[z:end]+= n-k+1
     newnzvals = allvals[deleteat!(sinds[1:k],z)]
     SparseVector(n,newnzind,newnzvals)
+end
+
+function fkeep!(x::SparseVector, f, trim::Bool = true)
+    n = x.n
+    nzind = x.nzind
+    nzval = x.nzval
+
+    x_writepos = 1
+    @inbounds for xk in 1:nnz(x)
+        xi = nzind[xk]
+        xv = nzval[xk]
+        # If this element should be kept, rewrite in new position
+        if f(xi, xv)
+            if x_writepos != xk
+                nzind[x_writepos] = xi
+                nzval[x_writepos] = xv
+            end
+            x_writepos += 1
+        end
+    end
+
+    # Trim x's storage if necessary and desired
+    if trim
+        x_nnz = x_writepos - 1
+        if length(nzind) != x_nnz
+            resize!(nzval, x_nnz)
+            resize!(nzind, x_nnz)
+        end
+    end
+
+    x
+end
+
+droptol!(x::SparseVector, tol, trim::Bool = true) = fkeep!(x, (i, x) -> abs(x) > tol, trim)
+
+dropzeros!(x::SparseVector, trim::Bool = true) = fkeep!(x, (i, x) -> x != 0, trim)
+dropzeros(x::SparseVector, trim::Bool = true) = dropzeros!(copy(x), trim)
+
+function _fillnonzero!{Tv,Ti}(arr::SparseMatrixCSC{Tv, Ti}, val)
+    m, n = size(arr)
+    resize!(arr.colptr, n+1)
+    resize!(arr.rowval, m*n)
+    resize!(arr.nzval, m*n)
+    copy!(arr.colptr, 1:m:n*m+1)
+    fill!(arr.nzval, val)
+    index = 1
+    @inbounds for _ in 1:n
+        for i in 1:m
+            arr.rowval[index] = Ti(i)
+            index += 1
+        end
+    end
+    arr
+end
+
+function _fillnonzero!{Tv,Ti}(arr::SparseVector{Tv,Ti}, val)
+    n = arr.n
+    resize!(arr.nzind, n)
+    resize!(arr.nzval, n)
+    @inbounds for i in 1:n
+        arr.nzind[i] = Ti(i)
+    end
+    fill!(arr.nzval, val)
+    arr
+end
+
+import Base.fill!
+function fill!(A::Union{SparseVector, SparseMatrixCSC}, x)
+    T = eltype(A)
+    xT = convert(T, x)
+    if xT == zero(T)
+        fill!(A.nzval, xT)
+    else
+        _fillnonzero!(A, xT)
+    end
+    return A
 end

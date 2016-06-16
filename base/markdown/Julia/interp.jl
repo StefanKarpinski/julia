@@ -9,7 +9,7 @@ end
 
 function interpinner(stream::IO, greedy = false)
     startswith(stream, '$') || return
-    (eof(stream) || peek(stream) in whitespace) && return
+    (eof(stream) || Char(peek(stream)) in whitespace) && return
     try
         return Base.parse(stream::IOBuffer, greedy = greedy)
     catch e
@@ -39,7 +39,7 @@ end
 
 toexpr(x) = x
 
-toexpr(xs::Vector{Any}) = Expr(:cell1d, map(toexpr, xs)...)
+toexpr(xs::Vector{Any}) = Expr(:call, GlobalRef(Base,:vector_any), map(toexpr, xs)...)
 
 function deftoexpr(T)
     @eval function toexpr(md::$T)

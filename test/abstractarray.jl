@@ -1,5 +1,84 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
+# Bounds checking
+A = rand(3,3,3)
+@test checkbounds(Bool, A, 1, 1, 1) == true
+@test checkbounds(Bool, A, 1, 3, 3) == true
+@test checkbounds(Bool, A, 1, 4, 3) == false
+@test checkbounds(Bool, A, 1, -1, 3) == false
+@test checkbounds(Bool, A, 1, 9) == true     # partial linear indexing
+@test checkbounds(Bool, A, 1, 10) == false     # partial linear indexing
+@test checkbounds(Bool, A, 1) == true
+@test checkbounds(Bool, A, 27) == true
+@test checkbounds(Bool, A, 28) == false
+@test checkbounds(Bool, A, 2, 2, 2, 1) == true
+@test checkbounds(Bool, A, 2, 2, 2, 2) == false
+
+@test  Base.checkbounds_indices((1:5, 1:5), (2,2))
+@test !Base.checkbounds_indices((1:5, 1:5), (7,2))
+@test !Base.checkbounds_indices((1:5, 1:5), (2,0))
+@test  Base.checkbounds_indices((1:5, 1:5), (13,))
+@test !Base.checkbounds_indices((1:5, 1:5), (26,))
+@test  Base.checkbounds_indices((1:5, 1:5), (2,2,1))
+@test !Base.checkbounds_indices((1:5, 1:5), (2,2,2))
+
+# sub2ind & ind2sub
+# 0-dimensional
+for i = 1:4
+    @test sub2ind((), i) == i
+end
+@test sub2ind((), 2, 2) == 3
+@test ind2sub((), 1) == ()
+@test_throws BoundsError ind2sub((), 2)
+# 1-dimensional
+for i = 1:4
+    @test sub2ind((3,), i) == i
+    @test ind2sub((3,), i) == (i,)
+end
+@test sub2ind((3,), 2, 2) == 5
+@test_throws MethodError ind2sub((3,), 2, 2)
+#   ambiguity btw cartesian indexing and linear indexing in 1d when
+#   indices may be nontraditional
+@test_throws ArgumentError sub2ind((1:3,), 2)
+@test_throws ArgumentError ind2sub((1:3,), 2)
+# 2-dimensional
+k = 0
+for j = 1:3, i = 1:4
+    @test sub2ind((4,3), i, j) == (k+=1)
+    @test ind2sub((4,3), k) == (i,j)
+    @test sub2ind((1:4,1:3), i, j) == k
+    @test ind2sub((1:4,1:3), k) == (i,j)
+    @test sub2ind((0:3,3:5), i-1, j+2) == k
+    @test ind2sub((0:3,3:5), k) == (i-1, j+2)
+end
+# Delete when partial linear indexing is deprecated (#14770)
+@test sub2ind((4,3), 7) == 7
+@test sub2ind((1:4,1:3), 7) == 7
+@test sub2ind((0:3,3:5), 7) == 8
+# 3-dimensional
+l = 0
+for k = 1:2, j = 1:3, i = 1:4
+    @test sub2ind((4,3,2), i, j, k) == (l+=1)
+    @test ind2sub((4,3,2), l) == (i,j,k)
+    @test sub2ind((1:4,1:3,1:2), i, j, k) == l
+    @test ind2sub((1:4,1:3,1:2), l) == (i,j,k)
+    @test sub2ind((0:3,3:5,-101:-100), i-1, j+2, k-102) == l
+    @test ind2sub((0:3,3:5,-101:-100), l) == (i-1, j+2, k-102)
+end
+
+A = reshape(collect(1:9), (3,3))
+@test ind2sub(size(A), 6) == (3,2)
+@test sub2ind(size(A), 3, 2) == 6
+@test ind2sub(A, 6) == (3,2)
+@test sub2ind(A, 3, 2) == 6
+
+# PR #9256
+function pr9256()
+    m = [1 2 3; 4 5 6; 7 8 9]
+    ind2sub(m, 6)
+end
+@test pr9256() == (3,2)
+
 # token type on which to dispatch testing methods in order to avoid potential
 # name conflicts elsewhere in the base test suite
 type TestAbstractArray end
@@ -78,7 +157,7 @@ import Base: trailingsize
 const can_inline = Base.JLOptions().can_inline != 0
 function test_scalar_indexing{T}(::Type{T}, shape, ::Type{TestAbstractArray})
     N = prod(shape)
-    A = reshape(1:N, shape)
+    A = reshape(collect(1:N), shape)
     B = T(A)
     @test A == B
     # Test indexing up to 5 dimensions
@@ -186,7 +265,7 @@ end
 
 function test_vector_indexing{T}(::Type{T}, shape, ::Type{TestAbstractArray})
     N = prod(shape)
-    A = reshape(1:N, shape)
+    A = reshape(collect(1:N), shape)
     B = T(A)
     idxs = rand(1:N, 3, 3, 3)
     @test B[idxs] == A[idxs] == idxs
@@ -198,11 +277,31 @@ function test_vector_indexing{T}(::Type{T}, shape, ::Type{TestAbstractArray})
     # Test with containers that aren't Int[]
     @test B[[]] == A[[]] == []
     @test B[convert(Array{Any}, idxs)] == A[convert(Array{Any}, idxs)] == idxs
+
+    # Test adding dimensions with matrices
+    idx1 = rand(1:size(A, 1), 3)
+    idx2 = rand(1:Base.trailingsize(A, 2), 4, 5)
+    @test B[idx1, idx2] == A[idx1, idx2] == reshape(A[idx1, vec(idx2)], 3, 4, 5) == reshape(B[idx1, vec(idx2)], 3, 4, 5)
+    @test B[1, idx2] == A[1, idx2] == reshape(A[1, vec(idx2)], 4, 5) == reshape(B[1, vec(idx2)], 4, 5)
+
+    # test removing dimensions with 0-d arrays
+    idx0 = reshape([rand(1:size(A, 1))])
+    @test B[idx0, idx2] == A[idx0, idx2] == reshape(A[idx0[], vec(idx2)], 4, 5) == reshape(B[idx0[], vec(idx2)], 4, 5)
+    @test B[reshape([end]), reshape([end])] == A[reshape([end]), reshape([end])] == reshape([A[end,end]]) == reshape([B[end,end]])
+
+    # test logical indexing
+    mask = bitrand(shape)
+    @test B[mask] == A[mask] == B[find(mask)] == A[find(mask)] == find(mask)
+    @test B[vec(mask)] == A[vec(mask)] == find(mask)
+    mask1 = bitrand(size(A, 1))
+    mask2 = bitrand(Base.trailingsize(A, 2))
+    @test B[mask1, mask2] == A[mask1, mask2] == B[find(mask1), find(mask2)]
+    @test B[mask1, 1] == A[mask1, 1] == find(mask1)
 end
 
 function test_primitives{T}(::Type{T}, shape, ::Type{TestAbstractArray})
     N = prod(shape)
-    A = reshape(1:N, shape)
+    A = reshape(collect(1:N), shape)
     B = T(A)
 
     # last(a)
@@ -222,10 +321,10 @@ function test_primitives{T}(::Type{T}, shape, ::Type{TestAbstractArray})
     end
 
     # reshape(a::AbstractArray, dims::Dims)
-    @test_throws ArgumentError reshape(B, (0, 1))
+    @test_throws DimensionMismatch reshape(B, (0, 1))
 
     # copy!(dest::AbstractArray, src::AbstractArray)
-    @test_throws BoundsError copy!(Array(Int, 10), [1:11...])
+    @test_throws BoundsError copy!(Array{Int}(10), [1:11...])
 
     # convert{T, N}(::Type{Array}, A::AbstractArray{T, N})
     X = [1:10...]
@@ -234,12 +333,13 @@ end
 
 function test_in_bounds(::Type{TestAbstractArray})
     n = rand(2:5)
-    dims = tuple(rand(2:5, n)...)
-    len = prod(dims)
+    sz = rand(2:5, n)
+    len = prod(sz)
+    A = zeros(sz...)
     for i in 1:len
-        @test checkbounds(Bool, dims, i) == true
+        @test checkbounds(Bool, A, i) == true
     end
-    @test checkbounds(Bool, dims, len + 1) == false
+    @test checkbounds(Bool, A, len + 1) == false
 end
 
 type UnimplementedFastArray{T, N} <: AbstractArray{T, N} end
@@ -252,7 +352,7 @@ type UnimplementedArray{T, N} <: AbstractArray{T, N} end
 
 function test_getindex_internals{T}(::Type{T}, shape, ::Type{TestAbstractArray})
     N = prod(shape)
-    A = reshape(1:N, shape)
+    A = reshape(collect(1:N), shape)
     B = T(A)
 
     @test getindex(A) == 1
@@ -272,7 +372,7 @@ end
 
 function test_setindex!_internals{T}(::Type{T}, shape, ::Type{TestAbstractArray})
     N = prod(shape)
-    A = reshape(1:N, shape)
+    A = reshape(collect(1:N), shape)
     B = T(A)
 
     Base.unsafe_setindex!(B, 1)
@@ -282,9 +382,10 @@ end
 function test_setindex!_internals(::Type{TestAbstractArray})
     U = UnimplementedFastArray{Int, 2}()
     V = UnimplementedSlowArray{Int, 2}()
-    @test_throws ErrorException setindex!(U, 1)
-    @test_throws ErrorException Base.unsafe_setindex!(U, 1)
-    @test_throws ErrorException Base.unsafe_setindex!(U, 1, 1)
+    @test_throws ErrorException setindex!(U, 0, 1)
+    @test_throws ErrorException Base.unsafe_setindex!(U, 0, 1)
+    @test_throws ErrorException setindex!(V, 0, 1, 1)
+    @test_throws ErrorException Base.unsafe_setindex!(V, 0, 1, 1)
 end
 
 function test_get(::Type{TestAbstractArray})
@@ -299,14 +400,14 @@ function test_cat(::Type{TestAbstractArray})
     A = T24Linear([1:24...])
     b_int = reshape([1:27...], 3, 3, 3)
     b_float = reshape(Float64[1:27...], 3, 3, 3)
-    b2hcat = Array(Float64, 3, 6, 3)
+    b2hcat = Array{Float64}(3, 6, 3)
     b1 = reshape([1:9...], 3, 3)
     b2 = reshape([10:18...], 3, 3)
     b3 = reshape([19:27...], 3, 3)
     b2hcat[:, :, 1] = hcat(b1, b1)
     b2hcat[:, :, 2] = hcat(b2, b2)
     b2hcat[:, :, 3] = hcat(b3, b3)
-    b3hcat = Array(Float64, 3, 9, 3)
+    b3hcat = Array{Float64}(3, 9, 3)
     b3hcat[:, :, 1] = hcat(b1, b1, b1)
     b3hcat[:, :, 2] = hcat(b2, b2, b2)
     b3hcat[:, :, 3] = hcat(b3, b3, b3)
@@ -362,7 +463,7 @@ function test_ind2sub(::Type{TestAbstractArray})
     n = rand(2:5)
     dims = tuple(rand(1:5, n)...)
     len = prod(dims)
-    A = reshape(1:len, dims...)
+    A = reshape(collect(1:len), dims...)
     I = ind2sub(dims, [1:len...])
     for i in 1:len
         idx = [ I[j][i] for j in 1:n ]
@@ -380,7 +481,6 @@ Base.getindex(A::TSlowNIndexes, index::Int...) = error("Must use $(ndims(A)) ind
 Base.getindex{T}(A::TSlowNIndexes{T,2}, i::Int, j::Int) = A.data[i,j]
 
 
-
 type GenericIterator{N} end
 Base.start{N}(::GenericIterator{N}) = 1
 Base.next{N}(::GenericIterator{N}, i) = (i, i + 1)
@@ -388,50 +488,66 @@ Base.done{N}(::GenericIterator{N}, i) = i > N ? true : false
 Base.iteratorsize{N}(::Type{GenericIterator{N}}) = Base.SizeUnknown()
 
 function test_map(::Type{TestAbstractArray})
+    empty_pool = WorkerPool()
+    pmap_fallback = (f, c...) -> pmap(empty_pool, f, c...)
 
-    for typ in (Float16, Float32, Float64,
-                Int8, Int16, Int32, Int64, Int128,
-                UInt8, UInt16, UInt32, UInt64, UInt128
-    ),
-        arg_typ in (Integer,
-                    Signed,
-                    Unsigned
-    )
-        X = typ[1:10...]
-        _typ = typeof(arg_typ(one(typ)))
-        @test map(arg_typ, X) == _typ[1:10...]
+    for mapf in [map, asyncmap, pmap_fallback]
+        for typ in (Float16, Float32, Float64,
+                    Int8, Int16, Int32, Int64, Int128,
+                    UInt8, UInt16, UInt32, UInt64, UInt128),
+            arg_typ in (Integer,
+                        Signed,
+                        Unsigned)
+            X = typ[1:10...]
+            _typ = typeof(arg_typ(one(typ)))
+            @test mapf(arg_typ, X) == _typ[1:10...]
+        end
+
+        # generic map
+        f(x) = x + 1
+        I = GenericIterator{10}()
+        @test mapf(f, I) == Any[2:11...]
+
+        # AbstractArray map for 2 arg case
+        f(x, y) = x + y
+        B = Float64[1:10...]
+        C = Float64[1:10...]
+        @test mapf(f, convert(Vector{Int},B), C) == Float64[ 2 * i for i in 1:10 ]
+        @test mapf(f, Int[], Float64[]) == Union{}[]
+        # map with different result types
+        let m = mapf(x->x+1, Number[1, 2.0])
+            # FIXME why is this different for asyncmap?
+            @test mapf !== map || isa(m, Vector{Real})
+            @test m == Real[2, 3.0]
+        end
+
+        # AbstractArray map for N-arg case
+        A = Array{Int}(10)
+        f(x, y, z) = x + y + z
+        D = Float64[1:10...]
+
+        @test map!(f, A, B, C, D) == Int[ 3 * i for i in 1:10 ]
+        @test mapf(f, B, C, D) == Float64[ 3 * i for i in 1:10 ]
+        @test mapf(f, Int[], Int[], Complex{Int}[]) == Union{}[]
     end
 
-    # generic map
-    f(x) = x + 1
-    I = GenericIterator{10}()
-    @test map(f, I) == Any[2:11...]
-    @test collect(Base.StreamMapIterator(f, I)) == Any[2:11...]
-
-    # AbstractArray map for 2 arg case
-    f(x, y) = x + y
+    # In-place map
+    A = Float64[1:10...]
+    map!(x->x*x, A)
+    @test A == map(x->x*x, Float64[1:10...])
     B = Float64[1:10...]
-    C = Float64[1:10...]
-    @test map(f, convert(Vector{Int},B), C) == Float64[ 2 * i for i in 1:10 ]
-    @test map(f, Int[], Float64[]) == Union{}[]
-    @test collect(Base.StreamMapIterator(f, Int[], Float64[])) == Float64[]
-    # map with different result tyoes
-    let m = map(x->x+1, Number[1, 2.0])
-        @test isa(m, Vector{Real})
-        @test m == Real[2, 3.0]
-    end
+    Base.asyncmap!(x->x*x, B)
+    @test A == B
 
-    # AbstractArray map for N-arg case
-    A = Array(Int, 10)
-    f(x, y, z) = x + y + z
-    D = Float64[1:10...]
-
-    @test map!(f, A, B, C, D) == Int[ 3 * i for i in 1:10 ]
-    @test map(f, B, C, D) == Float64[ 3 * i for i in 1:10 ]
-    @test collect(Base.StreamMapIterator(f, B, C, D)) == Float64[ 3 * i for i in 1:10 ]
-    @test collect(Base.StreamMapIterator(f, Int[], Int[], Complex{Int}[])) == Number[]
-    @test map(f, Int[], Int[], Complex{Int}[]) == Union{}[]
+    # Map to destination collection
+    map!((x,y,z)->x*y*z, A, Float64[1:10...], Float64[1:10...], Float64[1:10...])
+    @test A == map(x->x*x*x, Float64[1:10...])
+    Base.asyncmap!((x,y,z)->x*y*z, B, Float64[1:10...], Float64[1:10...], Float64[1:10...])
+    @test A == B
 end
+
+# issue #15689, mapping an abstract type
+@test isa(map(Set, Array[[1,2],[3,4]]), Vector{Set{Int}})
 
 function test_UInt_indexing(::Type{TestAbstractArray})
     A = [1:100...]
@@ -444,24 +560,6 @@ function test_UInt_indexing(::Type{TestAbstractArray})
             @eval begin
                 @test $_A[$_i] == $i
             end
-        end
-    end
-end
-
-function test_vcat_depwarn(::Type{TestAbstractArray})
-    if (Base.JLOptions()).depwarn > 1
-        @test_throws ErrorException [1:10]
-        @test_throws ErrorException [[1, 2], [3, 4]]
-        @test_throws ErrorException [[1, 2], [3, 4], [5, 6]]
-    else
-        olderr = STDERR
-        try
-            rd, wr = redirect_stderr()
-            @test [1:10] == [1:10...]
-            @test [[1, 2], [3, 4]] == [1, 2, 3, 4]
-            @test [[1, 2], [3, 4], [5, 6]] == [1, 2, 3, 4, 5, 6]
-        finally
-            redirect_stderr(olderr)
         end
     end
 end
@@ -496,7 +594,6 @@ test_cat(TestAbstractArray)
 test_ind2sub(TestAbstractArray)
 test_map(TestAbstractArray)
 test_UInt_indexing(TestAbstractArray)
-test_vcat_depwarn(TestAbstractArray)
 test_13315(TestAbstractArray)
 test_checksquare()
 
@@ -504,3 +601,13 @@ A = TSlowNIndexes(rand(2,2))
 @test_throws ErrorException A[1]
 @test A[1,1] == A.data[1]
 @test first(A) == A.data[1]
+
+#16381
+@inferred size(rand(3,2,1), 2, 1)
+@inferred size(rand(3,2,1), 2, 1, 3)
+
+@test @inferred(indices(rand(3,2)))    == (1:3,1:2)
+@test @inferred(indices(rand(3,2,1)))  == (1:3,1:2,1:1)
+@test @inferred(indices(rand(3,2), 1)) == 1:3
+@test @inferred(indices(rand(3,2), 2)) == 1:2
+@test @inferred(indices(rand(3,2), 3)) == 1:1

@@ -19,7 +19,7 @@ default: $(JULIA_BUILD_MODE) # contains either "debug" or "release"
 all: debug release
 
 # sort is used to remove potential duplicates
-DIRS := $(sort $(build_bindir) $(build_libdir) $(build_private_libdir) $(build_libexecdir) $(build_sysconfdir)/julia $(build_datarootdir)/julia $(build_man1dir))
+DIRS := $(sort $(build_bindir) $(build_depsbindir) $(build_libdir) $(build_private_libdir) $(build_libexecdir) $(build_sysconfdir)/julia $(build_datarootdir)/julia $(build_man1dir))
 ifneq ($(BUILDROOT),$(JULIAHOME))
 BUILDDIRS := $(BUILDROOT) $(addprefix $(BUILDROOT)/,base src ui doc deps test test/perf)
 BUILDDIRMAKE := $(addsuffix /Makefile,$(BUILDDIRS))
@@ -153,14 +153,15 @@ release-candidate: release testall
 	@echo 1. Remove deprecations in base/deprecated.jl
 	@echo 2. Update references to the julia version in the source directories, such as in README.md
 	@echo 3. Bump VERSION
-	@echo 4. Create tag, push to github "\(git tag v\`cat VERSION\` && git push --tags\)"		#"` # These comments deal with incompetent syntax highlighting rules
-	@echo 5. Clean out old .tar.gz files living in deps/, "\`git clean -fdx\`" seems to work	#"`
-	@echo 6. Replace github release tarball with tarballs created from make light-source-dist and make full-source-dist
-	@echo 7. Follow packaging instructions in DISTRIBUTING.md to create binary packages for all platforms
-	@echo 8. Upload to AWS, update http://julialang.org/downloads and http://status.julialang.org/stable links
-	@echo 9. Update checksums on AWS for tarball and packaged binaries
-	@echo 10. Announce on mailing lists
-	@echo 11. Change master to release-0.X in base/version.jl and base/version_git.sh as in 4cb1e20
+	@echo 4. Increase SOMAJOR and SOMINOR if needed.
+	@echo 5. Create tag, push to github "\(git tag v\`cat VERSION\` && git push --tags\)"		#"` # These comments deal with incompetent syntax highlighting rules
+	@echo 6. Clean out old .tar.gz files living in deps/, "\`git clean -fdx\`" seems to work	#"`
+	@echo 7. Replace github release tarball with tarballs created from make light-source-dist and make full-source-dist
+	@echo 8. Follow packaging instructions in DISTRIBUTING.md to create binary packages for all platforms
+	@echo 9. Upload to AWS, update http://julialang.org/downloads and http://status.julialang.org/stable links
+	@echo 10. Update checksums on AWS for tarball and packaged binaries
+	@echo 11. Announce on mailing lists
+	@echo 12. Change master to release-0.X in base/version.jl and base/version_git.sh as in 4cb1e20
 	@echo
 
 $(build_man1dir)/julia.1: $(JULIAHOME)/doc/man/julia.1 | $(build_man1dir)
@@ -193,7 +194,6 @@ CORE_SRCS := $(addprefix $(JULIAHOME)/, \
 		base/essentials.jl \
 		base/generator.jl \
 		base/expr.jl \
-		base/functors.jl \
 		base/hashing.jl \
 		base/inference.jl \
 		base/int.jl \
@@ -211,31 +211,26 @@ CORE_SRCS := $(addprefix $(JULIAHOME)/, \
 		base/tuple.jl)
 BASE_SRCS := $(shell find $(JULIAHOME)/base -name \*.jl)
 
-$(build_private_libdir)/inference0.ji: $(CORE_SRCS) | $(build_private_libdir)
+$(build_private_libdir)/inference.ji: $(CORE_SRCS) | $(build_private_libdir)
 	@$(call PRINT_JULIA, cd $(JULIAHOME)/base && \
-	$(call spawn,$(JULIA_EXECUTABLE)) -C $(JULIA_CPU_TARGET) --output-ji $(call cygpath_w,$@) -f \
-		coreimg.jl)
-
-$(build_private_libdir)/inference.ji: $(build_private_libdir)/inference0.ji
-	@$(call PRINT_JULIA, cd $(JULIAHOME)/base && \
-	$(call spawn,$(JULIA_EXECUTABLE)) -C $(JULIA_CPU_TARGET) --output-ji $(call cygpath_w,$@) -f \
-		-J $(call cygpath_w,$<) coreimg.jl)
+	$(call spawn,$(JULIA_EXECUTABLE)) -C $(JULIA_CPU_TARGET) --output-ji $(call cygpath_w,$@) \
+		--startup-file=no coreimg.jl)
 
 RELBUILDROOT := $(shell $(JULIAHOME)/contrib/relative_path.sh "$(JULIAHOME)/base" "$(BUILDROOT)/base/")
 COMMA:=,
 define sysimg_builder
 $$(build_private_libdir)/sys$1.o: $$(build_private_libdir)/inference.ji $$(JULIAHOME)/VERSION $$(BASE_SRCS)
 	@$$(call PRINT_JULIA, cd $$(JULIAHOME)/base && \
-	$$(call spawn,$3) $2 -C $$(JULIA_CPU_TARGET) --output-o $$(call cygpath_w,$$@) $$(JULIA_SYSIMG_BUILD_FLAGS) -f \
-		-J $$(call cygpath_w,$$<) sysimg.jl $$(RELBUILDROOT) \
+	$$(call spawn,$3) $2 -C $$(JULIA_CPU_TARGET) --output-o $$(call cygpath_w,$$@) $$(JULIA_SYSIMG_BUILD_FLAGS) \
+		--startup-file=no --sysimage $$(call cygpath_w,$$<) sysimg.jl $$(RELBUILDROOT) \
 		|| { echo '*** This error is usually fixed by running `make clean`. If the error persists$$(COMMA) try `make cleanall`. ***' && false; } )
 .SECONDARY: $(build_private_libdir)/sys$1.o
 endef
 $(eval $(call sysimg_builder,,-O3,$(JULIA_EXECUTABLE_release)))
 $(eval $(call sysimg_builder,-debug,-O0,$(JULIA_EXECUTABLE_debug)))
 
-$(build_bindir)/stringreplace: $(JULIAHOME)/contrib/stringreplace.c | $(build_bindir)
-	@$(call PRINT_CC, $(HOSTCC) -o $(build_bindir)/stringreplace $(JULIAHOME)/contrib/stringreplace.c)
+$(build_depsbindir)/stringreplace: $(JULIAHOME)/contrib/stringreplace.c | $(build_depsbindir)
+	@$(call PRINT_CC, $(HOSTCC) -o $(build_depsbindir)/stringreplace $(JULIAHOME)/contrib/stringreplace.c)
 
 
 # public libraries, that are installed in $(prefix)/lib
@@ -302,9 +297,11 @@ endif
 
 ifeq ($(OS),WINNT)
 define std_dll
-julia-deps: | $$(build_bindir)/lib$(1).dll
+julia-deps: | $$(build_bindir)/lib$(1).dll $$(build_depsbindir)/lib$(1).dll
 $$(build_bindir)/lib$(1).dll: | $$(build_bindir)
-	cp $$(call pathsearch,lib$(1).dll,$$(STD_LIB_PATH)) $$(build_bindir) ;
+	cp $$(call pathsearch,lib$(1).dll,$$(STD_LIB_PATH)) $$(build_bindir)
+$$(build_depsbindir)/lib$(1).dll: | $$(build_depsbindir)
+	cp $$(call pathsearch,lib$(1).dll,$$(STD_LIB_PATH)) $$(build_depsbindir)
 JL_LIBS += $(1)
 endef
 $(eval $(call std_dll,gfortran-3))
@@ -318,10 +315,10 @@ endif
 $(eval $(call std_dll,ssp-0))
 endif
 define stringreplace
-	$(build_bindir)/stringreplace $$(strings -t x - $1 | grep '$2' | awk '{print $$1;}') '$3' 255 "$(call cygpath_w,$1)"
+	$(build_depsbindir)/stringreplace $$(strings -t x - $1 | grep '$2' | awk '{print $$1;}') '$3' 255 "$(call cygpath_w,$1)"
 endef
 
-install: $(build_bindir)/stringreplace $(BUILDROOT)/doc/_build/html
+install: $(build_depsbindir)/stringreplace $(BUILDROOT)/doc/_build/html
 	@$(MAKE) $(QUIET_MAKE) all
 	@for subdir in $(bindir) $(libexecdir) $(datarootdir)/julia/site/$(VERSDIR) $(docdir) $(man1dir) $(includedir)/julia $(libdir) $(private_libdir) $(sysconfdir); do \
 		mkdir -p $(DESTDIR)$$subdir; \
@@ -337,13 +334,14 @@ else
 
 	# Copy over .dSYM directories directly
 ifeq ($(OS),Darwin)
-	-cp -a $(build_libdir)/*.dSYM $(DESTDIR)$(private_libdir)
+	-cp -a $(build_libdir)/*.dSYM $(DESTDIR)$(libdir)
+	-cp -a $(build_private_libdir)/*.dSYM $(DESTDIR)$(private_libdir)
 endif
 
 	for suffix in $(JL_LIBS) ; do \
 		for lib in $(build_libdir)/lib$${suffix}*.$(SHLIB_EXT)*; do \
 			if [ "$${lib##*.}" != "dSYM" ]; then \
-				$(INSTALL_M) $$lib $(DESTDIR)$(private_libdir) ; \
+				$(INSTALL_M) $$lib $(DESTDIR)$(libdir) ; \
 			fi \
 		done \
 	done
@@ -415,8 +413,8 @@ else ifeq ($(OS), Linux)
 endif
 
 	# Overwrite JL_SYSTEM_IMAGE_PATH in julia library
-	$(call stringreplace,$(DESTDIR)$(private_libdir)/libjulia.$(SHLIB_EXT),sys.$(SHLIB_EXT)$$,$(private_libdir_rel)/sys.$(SHLIB_EXT))
-	$(call stringreplace,$(DESTDIR)$(private_libdir)/libjulia-debug.$(SHLIB_EXT),sys-debug.$(SHLIB_EXT)$$,$(private_libdir_rel)/sys-debug.$(SHLIB_EXT))
+	$(call stringreplace,$(DESTDIR)$(libdir)/libjulia.$(SHLIB_EXT),sys.$(SHLIB_EXT)$$,$(private_libdir_rel)/sys.$(SHLIB_EXT))
+	$(call stringreplace,$(DESTDIR)$(libdir)/libjulia-debug.$(SHLIB_EXT),sys-debug.$(SHLIB_EXT)$$,$(private_libdir_rel)/sys-debug.$(SHLIB_EXT))
 endif
 
 	mkdir -p $(DESTDIR)$(sysconfdir)
@@ -455,7 +453,7 @@ ifneq ($(OS), WINNT)
 	-$(JULIAHOME)/contrib/fixup-libgfortran.sh $(DESTDIR)$(private_libdir)
 endif
 ifeq ($(OS), Linux)
-	-$(JULIAHOME)/contrib/fixup-libstdc++.sh $(DESTDIR)$(private_libdir)
+	-$(JULIAHOME)/contrib/fixup-libstdc++.sh $(DESTDIR)$(libdir) $(DESTDIR)$(private_libdir)
 	# We need to bundle ca certs on linux now that we're using libgit2 with ssl
 ifeq ($(shell [ -e $(shell openssl version -d | cut -d '"' -f 2)/cert.pem ] && echo exists),exists)
 	-cp $(shell openssl version -d | cut -d '"' -f 2)/cert.pem $(DESTDIR)$(datarootdir)/julia/
@@ -536,7 +534,7 @@ clean: | $(CLEAN_TARGETS)
 	@-$(MAKE) -C $(BUILDROOT)/test clean
 	-rm -f $(BUILDROOT)/julia
 	-rm -f $(BUILDROOT)/*.tar.gz
-	-rm -f $(build_bindir)/stringreplace \
+	-rm -f $(build_depsbindir)/stringreplace \
 	   $(BUILDROOT)/light-source-dist.tmp $(BUILDROOT)/light-source-dist.tmp1 \
 	   $(BUILDROOT)/full-source-dist.tmp $(BUILDROOT)/full-source-dist.tmp1
 	-rm -fr $(build_private_libdir)
@@ -602,7 +600,7 @@ ifneq (,$(filter $(ARCH), i386 i486 i586 i686))
 		"mingw32-libexpat1 mingw32-zlib1" && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw32-libgfortran3-5.3.0-1.1.noarch.rpm && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw32-libquadmath0-5.3.0-1.1.noarch.rpm && \
-	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw32-libstdc++6-5.3.0-1.1.noarch.rpm && \
+	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw32-libstdc%2B%2B6-5.3.0-1.1.noarch.rpm && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw32-libgcc_s_sjlj1-5.3.0-1.1.noarch.rpm && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw32-libssp0-5.3.0-1.1.noarch.rpm && \
 	for i in *.rpm; do 7z x -y $$i; done && \
@@ -619,7 +617,7 @@ else ifeq ($(ARCH),x86_64)
 		"mingw64-libexpat1 mingw64-zlib1" && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw64-libgfortran3-5.3.0-1.1.noarch.rpm && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw64-libquadmath0-5.3.0-1.1.noarch.rpm && \
-	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw64-libstdc++6-5.3.0-1.1.noarch.rpm && \
+	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw64-libstdc%2B%2B6-5.3.0-1.1.noarch.rpm && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw64-libgcc_s_seh1-5.3.0-1.1.noarch.rpm && \
 	$(JLDOWNLOAD) https://juliacache.s3.amazonaws.com/mingw64-libssp0-5.3.0-1.1.noarch.rpm && \
 	for i in *.rpm; do 7z x -y $$i; done && \
@@ -641,7 +639,7 @@ endif
 ifeq ($(USE_SYSTEM_LLVM), 1)
 LLVM_SIZE := llvm-size$(EXE)
 else
-LLVM_SIZE := $(build_bindir)/llvm-size$(EXE)
+LLVM_SIZE := $(build_depsbindir)/llvm-size$(EXE)
 endif
 build-stats:
 	@echo $(JULCOLOR)' ==> ./julia binary sizes'$(ENDCOLOR)

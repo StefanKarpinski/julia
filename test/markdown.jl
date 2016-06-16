@@ -2,7 +2,7 @@
 
 using Base.Markdown
 import Base.Markdown: MD, Paragraph, Header, Italic, Bold, LineBreak, plain, term, html, rst, Table, Code, LaTeX, Footnote
-import Base: writemime
+import Base: show
 
 # Basics
 # Equality is checked by making sure the HTML output is
@@ -161,7 +161,7 @@ Some **bolded**
 """
 @test latex(book) == "\\section{Title}\nSome discussion\n\\begin{quote}\nA quote\n\\end{quote}\n\\subsection{Section \\emph{important}}\nSome \\textbf{bolded}\n\\begin{itemize}\n\\item list1\n\\item list2\n\\end{itemize}\n"
 
-# writemime output
+# mime output
 
 let out =
     """
@@ -179,8 +179,8 @@ let out =
       * list1
       * list2
     """
-    @test sprint(io -> writemime(io, "text/plain", book)) == out
-    @test sprint(io -> writemime(io, "text/markdown", book)) == out
+    @test sprint(io -> show(io, "text/plain", book)) == out
+    @test sprint(io -> show(io, "text/markdown", book)) == out
 end
 let out =
     """
@@ -196,7 +196,7 @@ let out =
     <li>list2</li>
     </ul>
     </div>"""
-    @test sprint(io -> writemime(io, "text/html", book)) == out
+    @test sprint(io -> show(io, "text/html", book)) == out
 end
 let out =
     """
@@ -212,7 +212,7 @@ let out =
     \\item list2
     \\end{itemize}
     """
-    @test sprint(io -> writemime(io, "text/latex", book)) == out
+    @test sprint(io -> show(io, "text/latex", book)) == out
 end
 let out =
     """
@@ -234,7 +234,7 @@ let out =
     * list1
     * list2
     """
-    @test sprint(io -> writemime(io, "text/rst", book)) == out
+    @test sprint(io -> show(io, "text/rst", book)) == out
 end
 
 # rst rendering
@@ -275,14 +275,14 @@ ref(x) = Reference(x)
 
 ref(mean)
 
-writemime(io::IO, m::MIME"text/plain", r::Reference) =
+show(io::IO, m::MIME"text/plain", r::Reference) =
     print(io, "$(r.ref) (see Julia docs)")
 
 mean_ref = md"Behaves like $(ref(mean))"
 @test plain(mean_ref) == "Behaves like mean (see Julia docs)\n"
 @test html(mean_ref) == "<p>Behaves like mean &#40;see Julia docs&#41;</p>\n"
 
-writemime(io::IO, m::MIME"text/html", r::Reference) =
+show(io::IO, m::MIME"text/html", r::Reference) =
     Markdown.withtag(io, :a, :href=>"test") do
         Markdown.htmlesc(io, Markdown.plaininline(r))
     end
@@ -408,4 +408,58 @@ let in_dollars =
 
     @test latex_doc == dollars
     @test latex_doc == backticks
+end
+
+# Nested backticks for inline code and math.
+
+let t_1 = "`code` ``math`` ```code``` ````math```` `````code`````",
+    t_2 = "`` `math` `` ``` `code` ``code`` ``` ```` `math` ``math`` ```math``` ````",
+    t_3 = "`` ` `` ``` `` ` `` ` ` ```",
+    t_4 = """`code
+    over several
+    lines` ``math
+    over several
+    lines`` ``math with
+    ` some extra ` ` backticks`
+    ``""",
+    t_5 = "``code at end of string`",
+    t_6 = "```math at end of string``"
+    @test Markdown.parse(t_1) == MD(Paragraph([
+        Code("code"),
+        " ",
+        LaTeX("math"),
+        " ",
+        Code("code"),
+        " ",
+        LaTeX("math"),
+        " ",
+        Code("code"),
+    ]))
+    @test Markdown.parse(t_2) == MD(Paragraph([
+        LaTeX("`math`"),
+        " ",
+        Code("`code` ``code``"),
+        " ",
+        LaTeX("`math` ``math`` ```math```"),
+    ]))
+    @test Markdown.parse(t_3) == MD(Paragraph([
+        LaTeX("`"),
+        " ",
+        Code("`` ` `` ` `"),
+    ]))
+    @test Markdown.parse(t_4) == MD(Paragraph([
+        Code("code over several lines"),
+        " ",
+        LaTeX("math over several lines"),
+        " ",
+        LaTeX("math with ` some extra ` ` backticks`")
+    ]))
+    @test Markdown.parse(t_5) == MD(Paragraph([
+        "`",
+        Code("code at end of string"),
+    ]))
+    @test Markdown.parse(t_6) == MD(Paragraph([
+        "`",
+        LaTeX("math at end of string"),
+    ]))
 end

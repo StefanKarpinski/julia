@@ -1,7 +1,9 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
 import .Libc: RawFD, dup
-@windows_only import .Libc: WindowsRawSocket
+if is_windows()
+    import .Libc: WindowsRawSocket
+end
 
 ## types ##
 typealias Callback Union{Function,Bool}
@@ -164,7 +166,7 @@ type TTY <: LibuvStream
     sendbuf::Nullable{IOBuffer}
     lock::ReentrantLock
     throttle::Int
-    @windows_only ispty::Bool
+    @static if is_windows(); ispty::Bool; end
     function TTY(handle)
         tty = new(
             handle,
@@ -175,8 +177,10 @@ type TTY <: LibuvStream
             false,Condition(),
             nothing, ReentrantLock(),
             DEFAULT_READ_BUFFER_SZ)
-        @windows_only tty.ispty = ccall(:jl_ispty, Cint, (Ptr{Void},), handle)!=0
-        tty
+        @static if is_windows()
+            tty.ispty = ccall(:jl_ispty, Cint, (Ptr{Void},), handle) != 0
+        end
+        return tty
     end
 end
 
@@ -190,7 +194,7 @@ function TTY(fd::RawFD; readable::Bool = false)
     uv_error("TTY",ccall(:uv_tty_init,Int32,(Ptr{Void},Ptr{Void},Int32,Int32),eventloop(),handle,fd.fd,readable))
     ret.status = StatusOpen
     ret.line_buffered = false
-    ret
+    return ret
 end
 
 show(io::IO,stream::LibuvServer) = print(io, typeof(stream), "(", uv_status_string(stream), ")")
@@ -325,7 +329,7 @@ function close(stream::Union{LibuvStream, LibuvServer})
     nothing
 end
 
-@windows_only begin
+if is_windows()
     ispty(s::TTY) = s.ispty
     ispty(s::IO) = false
 end
@@ -340,15 +344,17 @@ function displaysize(io::TTY)
     local h::Int, w::Int
     default_size = displaysize()
 
-    @windows_only if ispty(io)
-        # io is actually a libuv pipe but a cygwin/msys2 pty
-        try
-            h, w = map(x -> parse(Int, x), split(readstring(open(Base.Cmd(ByteString["stty", "size"]), "r", io)[1])))
-            h > 0 || (h = default_size[1])
-            w > 0 || (w = default_size[2])
-            return h, w
-        catch
-            return default_size
+    @static if is_windows()
+        if ispty(io)
+            # io is actually a libuv pipe but a cygwin/msys2 pty
+            try
+                h, w = map(x -> parse(Int, x), split(readstring(open(Base.Cmd(String["stty", "size"]), "r", io)[1])))
+                h > 0 || (h = default_size[1])
+                w > 0 || (w = default_size[2])
+                return h, w
+            catch
+                return default_size
+            end
         end
     end
 
@@ -527,7 +533,7 @@ pipe_writer(p::Pipe) = p.in
 function link_pipe(pipe::Pipe;
                julia_only_read = false,
                julia_only_write = false)
-     link_pipe(pipe.out, julia_only_read, pipe.in, julia_only_write);
+     link_pipe(pipe.out, julia_only_read, pipe.in, julia_only_write)
 end
 
 show(io::IO, stream::Pipe) = print(io,
@@ -748,7 +754,7 @@ function unsafe_read(s::LibuvStream, p::Ptr{UInt8}, nb::UInt)
     else
         try
             stop_reading(s) # Just playing it safe, since we are going to switch buffers.
-            newbuf = PipeBuffer(pointer_to_array(p, nb), #=maxsize=# Int(nb))
+            newbuf = PipeBuffer(unsafe_wrap(Array, p, nb), #=maxsize=# Int(nb))
             newbuf.size = 0 # reset the write pointer to the beginning
             s.buffer = newbuf
             write(newbuf, sbuf)
@@ -831,14 +837,14 @@ end
 
 function flush(s::LibuvStream)
     if isnull(s.sendbuf)
-        return s
+        return
     end
     buf = get(s.sendbuf)
     if nb_available(buf) > 0
         arr = takebuf_array(buf)        # Array of UInt8s
         uv_write(s, arr)
     end
-    return s
+    return
 end
 
 buffer_writes(s::LibuvStream, bufsize) = (s.sendbuf=PipeBuffer(bufsize); s)
@@ -950,20 +956,28 @@ end
 connect(path::AbstractString) = connect(init_pipe!(PipeEndpoint(); readable=false, writable=false, julia_only=true),path)
 
 _fd(x::IOStream) = RawFD(fd(x))
-@unix_only _fd(x::LibuvStream) = RawFD(ccall(:jl_uv_handle,Int32,(Ptr{Void},),x.handle))
-@windows_only _fd(x::LibuvStream) = WindowsRawSocket(
-    ccall(:jl_uv_handle,Ptr{Void},(Ptr{Void},),x.handle))
+if is_windows()
+    _fd(x::LibuvStream) = WindowsRawSocket(
+        ccall(:jl_uv_handle, Ptr{Void}, (Ptr{Void},), x.handle))
+else
+    _fd(x::LibuvStream) = RawFD(ccall(:jl_uv_handle, Int32, (Ptr{Void},), x.handle))
+end
 
-for (x,writable,unix_fd,c_symbol) in ((:STDIN,false,0,:jl_uv_stdin),(:STDOUT,true,1,:jl_uv_stdout),(:STDERR,true,2,:jl_uv_stderr))
-    f = symbol("redirect_"*lowercase(string(x)))
-    _f = symbol("_",f)
+for (x, writable, unix_fd, c_symbol) in
+        ((:STDIN, false, 0, :jl_uv_stdin),
+         (:STDOUT, true, 1, :jl_uv_stdout),
+         (:STDERR, true, 2, :jl_uv_stderr))
+    f = Symbol("redirect_",lowercase(string(x)))
+    _f = Symbol("_",f)
     @eval begin
         function ($_f)(stream)
             global $x
-            @windows? (
+            @static if is_windows()
                 ccall(:SetStdHandle,stdcall,Int32,(Int32,Ptr{Void}),
-                    $(-10-unix_fd), Libc._get_osfhandle(_fd(stream)).handle) ) : (
-                dup(_fd(stream),  RawFD($unix_fd)) )
+                    $(-10 - unix_fd), Libc._get_osfhandle(_fd(stream)).handle)
+            else
+                dup(_fd(stream),  RawFD($unix_fd))
+            end
             $x = stream
         end
         function ($f)(handle::Union{LibuvStream,IOStream})
@@ -999,7 +1013,12 @@ type BufferStream <: LibuvStream
 end
 
 isopen(s::BufferStream) = s.is_open
-close(s::BufferStream) = (s.is_open = false; notify(s.r_c; all=true); notify(s.close_c; all=true); nothing)
+function close(s::BufferStream)
+    s.is_open = false
+    notify(s.r_c; all=true)
+    notify(s.close_c; all=true)
+    nothing
+end
 read(s::BufferStream, ::Type{UInt8}) = (wait_readnb(s, 1); read(s.buffer, UInt8))
 unsafe_read(s::BufferStream, a::Ptr{UInt8}, nb::UInt) = (wait_readnb(s, Int(nb)); unsafe_read(s.buffer, a, nb))
 nb_available(s::BufferStream) = nb_available(s.buffer)
@@ -1038,4 +1057,4 @@ end
 
 # If buffer_writes is called, it will delay notifying waiters till a flush is called.
 buffer_writes(s::BufferStream, bufsize=0) = (s.buffer_writes=true; s)
-flush(s::BufferStream) = (notify(s.r_c; all=true); s)
+flush(s::BufferStream) = (notify(s.r_c; all=true); nothing)

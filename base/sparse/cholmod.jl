@@ -2,7 +2,7 @@
 
 module CHOLMOD
 
-import Base: (*), convert, copy, eltype, get, getindex, show, showarray, size,
+import Base: (*), convert, copy, eltype, get, getindex, show, size,
              linearindexing, LinearFast, LinearSlow, ctranspose
 
 import Base.LinAlg: (\), A_mul_Bc, A_mul_Bt, Ac_ldiv_B, Ac_mul_B, At_ldiv_B, At_mul_B,
@@ -29,7 +29,7 @@ const CHOLMOD_MIN_VERSION = v"2.1.1"
 ### These offsets are defined in SuiteSparse_wrapper.c
 const common_size = ccall((:jl_cholmod_common_size,:libsuitesparse_wrapper),Int,())
 
-const cholmod_com_offsets = Array(Csize_t, 19)
+const cholmod_com_offsets = Array{Csize_t}(19)
 ccall((:jl_cholmod_common_offsets, :libsuitesparse_wrapper),
     Void, (Ptr{Csize_t},), cholmod_com_offsets)
 
@@ -56,7 +56,7 @@ end
 
 common() = commonStruct
 
-const build_version_array = Array(Cint, 3)
+const build_version_array = Array{Cint}(3)
 ccall((:jl_cholmod_version, :libsuitesparse_wrapper), Cint, (Ptr{Cint},), build_version_array)
 const build_version = VersionNumber(build_version_array...)
 
@@ -64,7 +64,7 @@ function __init__()
     try
         ### Check if the linked library is compatible with the Julia code
         if Libdl.dlsym_e(Libdl.dlopen("libcholmod"), :cholmod_version) != C_NULL
-            current_version_array = Array(Cint, 3)
+            current_version_array = Array{Cint}(3)
             ccall((:cholmod_version, :libcholmod), Cint, (Ptr{Cint},), current_version_array)
             current_version = VersionNumber(current_version_array...)
         else # CHOLMOD < 2.1.1 does not include cholmod_version()
@@ -602,7 +602,8 @@ function copy{Tv<:VRealTypes}(A::Sparse{Tv}, stype::Integer, mode::Integer)
 end
 
 ### cholmod_check.h ###
-function print_sparse{Tv<:VTypes}(A::Sparse{Tv}, name::ASCIIString)
+function print_sparse{Tv<:VTypes}(A::Sparse{Tv}, name::String)
+    isascii(name) || error("non-ASCII name: $name")
     cm = common()
     set_print_level(cm, 3)
     @isok ccall((@cholmod_name("print_sparse", SuiteSparse_long),:libcholmod), Cint,
@@ -610,7 +611,7 @@ function print_sparse{Tv<:VTypes}(A::Sparse{Tv}, name::ASCIIString)
                  get(A.p), name, cm)
     nothing
 end
-function print_factor{Tv<:VTypes}(F::Factor{Tv}, name::ASCIIString)
+function print_factor{Tv<:VTypes}(F::Factor{Tv}, name::String)
     cm = common()
     set_print_level(cm, 3)
     @isok ccall((@cholmod_name("print_factor", SuiteSparse_long),:libcholmod), Cint,
@@ -703,10 +704,10 @@ function vertcat{Tv<:VRealTypes}(A::Sparse{Tv}, B::Sparse{Tv}, values::Bool)
 end
 
 function symmetry{Tv<:VTypes}(A::Sparse{Tv}, option::Integer)
-    xmatched = Array(SuiteSparse_long, 1)
-    pmatched = Array(SuiteSparse_long, 1)
-    nzoffdiag = Array(SuiteSparse_long, 1)
-    nzdiag = Array(SuiteSparse_long, 1)
+    xmatched = Array{SuiteSparse_long}(1)
+    pmatched = Array{SuiteSparse_long}(1)
+    nzoffdiag = Array{SuiteSparse_long}(1)
+    nzdiag = Array{SuiteSparse_long}(1)
     rv = ccall((@cholmod_name("symmetry", SuiteSparse_long), :libcholmod), Cint,
             (Ptr{C_Sparse{Tv}}, Cint, Ptr{SuiteSparse_long}, Ptr{SuiteSparse_long},
                 Ptr{SuiteSparse_long}, Ptr{SuiteSparse_long}, Ptr{UInt8}),
@@ -798,7 +799,7 @@ end
 
 function get_perm(F::Factor)
     s = unsafe_load(get(F.p))
-    p = pointer_to_array(s.Perm, s.n, false)
+    p = unsafe_wrap(Array, s.Perm, s.n, false)
     p+1
 end
 get_perm(FC::FactorComponent) = get_perm(Factor(FC))
@@ -808,7 +809,7 @@ get_perm(FC::FactorComponent) = get_perm(Factor(FC))
 #########################
 
 # Convertion/construction
-function convert{T<:VTypes}(::Type{Dense{T}}, A::VecOrMat)
+function convert{T<:VTypes}(::Type{Dense{T}}, A::StridedVecOrMat)
     d = allocate_dense(size(A, 1), size(A, 2), stride(A, 2), T)
     s = unsafe_load(d.p)
     for i in eachindex(A)
@@ -816,15 +817,16 @@ function convert{T<:VTypes}(::Type{Dense{T}}, A::VecOrMat)
     end
     d
 end
-function convert(::Type{Dense}, A::VecOrMat)
+function convert(::Type{Dense}, A::StridedVecOrMat)
     T = promote_type(eltype(A), Float64)
     return convert(Dense{T}, A)
 end
 convert(::Type{Dense}, A::Sparse) = sparse_to_dense(A)
 
 # This constructior assumes zero based colptr and rowval
-function (::Type{Sparse}){Tv<:VTypes}(m::Integer, n::Integer, colptr::Vector{SuiteSparse_long}, rowval::Vector{SuiteSparse_long}, nzval::Vector{Tv}, stype)
-
+function (::Type{Sparse}){Tv<:VTypes}(m::Integer, n::Integer,
+        colptr::Vector{SuiteSparse_long}, rowval::Vector{SuiteSparse_long},
+        nzval::Vector{Tv}, stype)
     # check if columns are sorted
     iss = true
     for i = 2:length(colptr)
@@ -844,8 +846,8 @@ function (::Type{Sparse}){Tv<:VTypes}(m::Integer, n::Integer, colptr::Vector{Sui
     @isok check_sparse(o)
 
     return o
-
 end
+
 function (::Type{Sparse}){Tv<:VTypes}(m::Integer, n::Integer, colptr::Vector{SuiteSparse_long}, rowval::Vector{SuiteSparse_long}, nzval::Vector{Tv})
     o = Sparse(m, n, colptr, rowval, nzval, 0)
 
@@ -902,7 +904,6 @@ end
 
 # Useful when reading in files, but not type stable
 function convert(::Type{Sparse}, p::Ptr{C_SparseVoid})
-
     if p == C_NULL
         throw(ArgumentError("sparse matrix construction failed for unknown reasons. Please submit a bug report."))
     end
@@ -942,12 +943,11 @@ function convert(::Type{Sparse}, p::Ptr{C_SparseVoid})
     end
 
     return Sparse(convert(Ptr{C_Sparse{Tv}}, p))
-
 end
 
 convert(::Type{Sparse}, A::Dense) = dense_to_sparse(A, SuiteSparse_long)
 convert(::Type{Sparse}, L::Factor) = factor_to_sparse!(copy(L))
-function (::Type{Sparse})(filename::ByteString)
+function (::Type{Sparse})(filename::String)
     open(filename) do f
         return read_sparse(f, SuiteSparse_long)
     end
@@ -956,24 +956,35 @@ end
 ## convertion back to base Julia types
 function convert{T}(::Type{Matrix{T}}, D::Dense{T})
     s = unsafe_load(D.p)
-    a = Array(T, s.nrow, s.ncol)
-    if s.d == s.nrow
-        unsafe_copy!(pointer(a), s.x, s.d*s.ncol)
+    a = Array{T}(s.nrow, s.ncol)
+    copy!(a, D)
+end
+
+Base.copy!(dest::Base.PermutedDimsArrays.PermutedDimsArray, src::Dense) = _copy!(dest, src) # ambig
+Base.copy!(dest::AbstractArray, D::Dense) = _copy!(dest, D)
+
+function _copy!(dest::AbstractArray, D::Dense)
+    s = unsafe_load(D.p)
+    n = s.nrow*s.ncol
+    n <= length(dest) || throw(BoundsError(dest, n))
+    if s.d == s.nrow && isa(dest, Array)
+        unsafe_copy!(pointer(dest), s.x, s.d*s.ncol)
     else
+        k = 0
         for j = 1:s.ncol
             for i = 1:s.nrow
-                a[i,j] = unsafe_load(s.x, i + (j - 1)*s.d)
+                dest[k+=1] = unsafe_load(s.x, i + (j - 1)*s.d)
             end
         end
     end
-    a
+    dest
 end
 convert{T}(::Type{Matrix}, D::Dense{T}) = convert(Matrix{T}, D)
 function convert{T}(::Type{Vector{T}}, D::Dense{T})
     if size(D, 2) > 1
         throw(DimensionMismatch("input must be a vector but had $(size(D, 2)) columns"))
     end
-    reshape(convert(Matrix, D), size(D, 1))
+    copy!(Array{T}(size(D, 1)), D)
 end
 convert{T}(::Type{Vector}, D::Dense{T}) = convert(Vector{T}, D)
 
@@ -982,21 +993,21 @@ function convert{Tv}(::Type{SparseMatrixCSC{Tv,SuiteSparse_long}}, A::Sparse{Tv}
     if s.stype != 0
         throw(ArgumentError("matrix has stype != 0. Convert to matrix with stype == 0 before converting to SparseMatrixCSC"))
     end
-    return SparseMatrixCSC(s.nrow, s.ncol, increment(pointer_to_array(s.p, (s.ncol + 1,), false)), increment(pointer_to_array(s.i, (s.nzmax,), false)), copy(pointer_to_array(s.x, (s.nzmax,), false)))
+    return SparseMatrixCSC(s.nrow, s.ncol, increment(unsafe_wrap(Array, s.p, (s.ncol + 1,), false)), increment(unsafe_wrap(Array, s.i, (s.nzmax,), false)), copy(unsafe_wrap(Array, s.x, (s.nzmax,), false)))
 end
 function convert(::Type{Symmetric{Float64,SparseMatrixCSC{Float64,SuiteSparse_long}}}, A::Sparse{Float64})
     s = unsafe_load(A.p)
     if !issymmetric(A)
         throw(ArgumentError("matrix is not symmetric"))
     end
-    return Symmetric(SparseMatrixCSC(s.nrow, s.ncol, increment(pointer_to_array(s.p, (s.ncol + 1,), false)), increment(pointer_to_array(s.i, (s.nzmax,), false)), copy(pointer_to_array(s.x, (s.nzmax,), false))), s.stype > 0 ? :U : :L)
+    return Symmetric(SparseMatrixCSC(s.nrow, s.ncol, increment(unsafe_wrap(Array, s.p, (s.ncol + 1,), false)), increment(unsafe_wrap(Array, s.i, (s.nzmax,), false)), copy(unsafe_wrap(Array, s.x, (s.nzmax,), false))), s.stype > 0 ? :U : :L)
 end
 function convert{Tv<:VTypes}(::Type{Hermitian{Tv,SparseMatrixCSC{Tv,SuiteSparse_long}}}, A::Sparse{Tv})
     s = unsafe_load(A.p)
     if !ishermitian(A)
         throw(ArgumentError("matrix is not Hermitian"))
     end
-    return Hermitian(SparseMatrixCSC(s.nrow, s.ncol, increment(pointer_to_array(s.p, (s.ncol + 1,), false)), increment(pointer_to_array(s.i, (s.nzmax,), false)), copy(pointer_to_array(s.x, (s.nzmax,), false))), s.stype > 0 ? :U : :L)
+    return Hermitian(SparseMatrixCSC(s.nrow, s.ncol, increment(unsafe_wrap(Array, s.p, (s.ncol + 1,), false)), increment(unsafe_wrap(Array, s.i, (s.nzmax,), false)), copy(unsafe_wrap(Array, s.x, (s.nzmax,), false))), s.stype > 0 ? :U : :L)
 end
 function sparse(A::Sparse{Float64}) # Notice! Cannot be type stable because of stype
     s = unsafe_load(A.p)
@@ -1025,7 +1036,7 @@ function sparse(F::Factor)
     SparseArrays.sortSparseMatrixCSC!(A)
     p = get_perm(F)
     if p != [1:s.n;]
-        pinv = Array(Int, length(p))
+        pinv = Array{Int}(length(p))
         for k = 1:length(p)
             pinv[p[k]] = k
         end
@@ -1069,8 +1080,7 @@ function show(io::IO, F::Factor)
     showfactor(io, F)
 end
 
-# FactorComponent is a subtype of AbstractArray and we therefore define showarray instead of show
-function showarray(io::IO, FC::FactorComponent; kargs...)
+function show(io::IO, FC::FactorComponent)
     println(io, typeof(FC))
     showfactor(io, Factor(FC))
 end
@@ -1137,7 +1147,7 @@ function getindex{T}(A::Sparse{T}, i0::Integer, i1::Integer)
     r1 = Int(unsafe_load(s.p, i1) + 1)
     r2 = Int(unsafe_load(s.p, i1 + 1))
     (r1 > r2) && return zero(T)
-    r1 = Int(searchsortedfirst(pointer_to_array(s.i, (s.nzmax,), false), i0 - 1, r1, r2, Base.Order.Forward))
+    r1 = Int(searchsortedfirst(unsafe_wrap(Array, s.i, (s.nzmax,), false), i0 - 1, r1, r2, Base.Order.Forward))
     ((r1 > r2) || (unsafe_load(s.i, r1) + 1 != i0)) ? zero(T) : unsafe_load(s.x, r1)
 end
 
@@ -1147,7 +1157,7 @@ function getindex(F::Factor, sym::Symbol)
 end
 
 function getLd!(S::SparseMatrixCSC)
-    d = Array(eltype(S), size(S, 1))
+    d = Array{eltype(S)}(size(S, 1))
     fill!(d, 0)
     col = 1
     for k = 1:length(S.nzval)
@@ -1242,11 +1252,7 @@ function cholfact!{Tv}(F::Factor{Tv}, A::Sparse{Tv}; shift::Real=0.0)
 end
 
 """
-    cholfact!(F::Factor, A::Union{SparseMatrixCSC{<:Real},
-        SparseMatrixCSC{Complex{<:Real}},
-        Symmetric{<:Real,SparseMatrixCSC{<:Real,SuiteSparse_long}},
-        Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},SuiteSparse_long}}};
-        shift = 0.0) -> CHOLMOD.Factor
+    cholfact!(F::Factor, A::Union{SparseMatrixCSC{<:Real},SparseMatrixCSC{Complex{<:Real}},Symmetric{<:Real,SparseMatrixCSC{<:Real,SuiteSparse_long}},Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},SuiteSparse_long}}}; shift = 0.0) -> CHOLMOD.Factor
 
 Compute the Cholesky (``LL'``) factorization of `A`, reusing the symbolic factorization `F`.
 
@@ -1260,7 +1266,8 @@ appropriate.
 cholfact!{T<:Real}(F::Factor, A::Union{SparseMatrixCSC{T},
         SparseMatrixCSC{Complex{T}},
         Symmetric{T,SparseMatrixCSC{T,SuiteSparse_long}},
-        Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}}};
+        Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}},
+        Hermitian{T,SparseMatrixCSC{T,SuiteSparse_long}}};
     shift = 0.0) =
     cholfact!(F, Sparse(A); shift = shift)
 
@@ -1282,14 +1289,11 @@ function cholfact(A::Sparse; shift::Real=0.0,
 end
 
 """
-    cholfact(::Union{SparseMatrixCSC{<:Real},SparseMatrixCSC{Complex{<:Real}},
-        Symmetric{<:Real,SparseMatrixCSC{<:Real,
-        SuiteSparse_long}},Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},
-        SuiteSparse_long}}}; shift = 0.0, perm=Int[]) -> CHOLMOD.Factor
+    cholfact(::Union{SparseMatrixCSC{<:Real},SparseMatrixCSC{Complex{<:Real}},Symmetric{<:Real,SparseMatrixCSC{<:Real,SuiteSparse_long}},Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},SuiteSparse_long}}}; shift = 0.0, perm = Int[]) -> CHOLMOD.Factor
 
 Compute the Cholesky factorization of a sparse positive definite matrix `A`.
 A fill-reducing permutation is used.
-`F = cholfact(A)` is most frequently used to solve systems of equations with `F\b`,
+`F = cholfact(A)` is most frequently used to solve systems of equations with `F\\b`,
 but also the methods `diag`, `det`, `logdet` are defined for `F`.
 You can also extract individual factors from `F`, using `F[:L]`.
 However, since pivoting is on by default,
@@ -1315,7 +1319,8 @@ Many other functions from CHOLMOD are wrapped but not exported from the
 """
 cholfact{T<:Real}(A::Union{SparseMatrixCSC{T}, SparseMatrixCSC{Complex{T}},
     Symmetric{T,SparseMatrixCSC{T,SuiteSparse_long}},
-    Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}}};
+    Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}},
+    Hermitian{T,SparseMatrixCSC{T,SuiteSparse_long}}};
     kws...) = cholfact(Sparse(A); kws...)
 
 
@@ -1337,11 +1342,7 @@ function ldltfact!{Tv}(F::Factor{Tv}, A::Sparse{Tv}; shift::Real=0.0)
 end
 
 """
-    ldltfact!(F::Factor, A::Union{SparseMatrixCSC{<:Real},
-        SparseMatrixCSC{Complex{<:Real}},
-        Symmetric{<:Real,SparseMatrixCSC{<:Real,SuiteSparse_long}},
-        Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},SuiteSparse_long}}};
-        shift = 0.0) -> CHOLMOD.Factor
+    ldltfact!(F::Factor, A::Union{SparseMatrixCSC{<:Real},SparseMatrixCSC{Complex{<:Real}},Symmetric{<:Real,SparseMatrixCSC{<:Real,SuiteSparse_long}},Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},SuiteSparse_long}}}; shift = 0.0) -> CHOLMOD.Factor
 
 Compute the ``LDL'`` factorization of `A`, reusing the symbolic factorization `F`.
 
@@ -1355,7 +1356,8 @@ appropriate.
 ldltfact!{T<:Real}(F::Factor, A::Union{SparseMatrixCSC{T},
     SparseMatrixCSC{Complex{T}},
     Symmetric{T,SparseMatrixCSC{T,SuiteSparse_long}},
-    Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}}};
+    Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}},
+    Hermitian{T,SparseMatrixCSC{T,SuiteSparse_long}}};
     shift = 0.0) =
     ldltfact!(F, Sparse(A), shift = shift)
 
@@ -1377,14 +1379,11 @@ function ldltfact(A::Sparse; shift::Real=0.0,
 end
 
 """
-    ldltfact(::Union{SparseMatrixCSC{<:Real},SparseMatrixCSC{Complex{<:Real}},
-        Symmetric{<:Real,SparseMatrixCSC{<:Real,SuiteSparse_long}},
-        Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},SuiteSparse_long}}};
-        shift = 0.0, perm=Int[]) -> CHOLMOD.Factor
+    ldltfact(::Union{SparseMatrixCSC{<:Real},SparseMatrixCSC{Complex{<:Real}},Symmetric{<:Real,SparseMatrixCSC{<:Real,SuiteSparse_long}},Hermitian{Complex{<:Real},SparseMatrixCSC{Complex{<:Real},SuiteSparse_long}}}; shift = 0.0, perm=Int[]) -> CHOLMOD.Factor
 
 Compute the ``LDL'`` factorization of a sparse symmetric or Hermitian matrix.
 A fill-reducing permutation is used.
-`F = ldltfact(A)` is most frequently used to solve systems of equations `A*x = b` with `F\b`.
+`F = ldltfact(A)` is most frequently used to solve systems of equations `A*x = b` with `F\\b`.
 The returned factorization object `F` also supports the methods `diag`,
 `det`, and `logdet`. You can extract individual factors from `F` using `F[:L]`.
 However, since pivoting is on by default,
@@ -1411,7 +1410,8 @@ Many other functions from CHOLMOD are wrapped but not exported from the
 """
 ldltfact{T<:Real}(A::Union{SparseMatrixCSC{T},SparseMatrixCSC{Complex{T}},
     Symmetric{T,SparseMatrixCSC{T,SuiteSparse_long}},
-    Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}}};
+    Hermitian{Complex{T},SparseMatrixCSC{Complex{T},SuiteSparse_long}},
+    Hermitian{T,SparseMatrixCSC{T,SuiteSparse_long}}};
     kws...) = ldltfact(Sparse(A); kws...)
 
 ## Solvers
@@ -1469,10 +1469,12 @@ end
 
 Ac_ldiv_B(L::FactorComponent, B) = ctranspose(L)\B
 
-(\){T}(L::Factor{T}, B::Dense{T}) = solve(CHOLMOD_A, L, B)
-(\)(L::Factor{Float64}, B::VecOrMat{Complex{Float64}}) = L\real(B) + L\imag(B)
-(\)(L::Factor, b::Vector) = Vector(L\convert(Dense{eltype(L)}, b))
-(\)(L::Factor, B::Matrix) = Matrix(L\convert(Dense{eltype(L)}, B))
+(\){T<:VTypes}(L::Factor{T}, B::Dense{T}) = solve(CHOLMOD_A, L, B)
+(\)(L::Factor{Float64}, B::VecOrMat{Complex{Float64}}) = complex(L\real(B), L\imag(B))
+# First explicit TypeVars are necessary to avoid ambiguity errors with definition in
+# linalg/factorizations.jl
+(\){T<:VTypes}(L::Factor{T}, b::StridedVector) = Vector(L\convert(Dense{T}, b))
+(\){T<:VTypes}(L::Factor{T}, B::StridedMatrix) = Matrix(L\convert(Dense{T}, B))
 (\)(L::Factor, B::Sparse) = spsolve(CHOLMOD_A, L, B)
 # When right hand side is sparse, we have to ensure that the rhs is not marked as symmetric.
 (\)(L::Factor, B::SparseVecOrMat) = sparse(spsolve(CHOLMOD_A, L, Sparse(B, 0)))
@@ -1566,5 +1568,6 @@ end
 
 (*){Ti}(A::Symmetric{Float64,SparseMatrixCSC{Float64,Ti}}, B::SparseVecOrMat{Float64,Ti}) = sparse(Sparse(A)*Sparse(B))
 (*){Ti}(A::Hermitian{Complex{Float64},SparseMatrixCSC{Complex{Float64},Ti}}, B::SparseVecOrMat{Complex{Float64},Ti}) = sparse(Sparse(A)*Sparse(B))
+(*){Ti}(A::Hermitian{Float64,SparseMatrixCSC{Float64,Ti}}, B::SparseVecOrMat{Float64,Ti}) = sparse(Sparse(A)*Sparse(B))
 
 end #module

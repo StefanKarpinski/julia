@@ -8,10 +8,11 @@ end
 
 function launch(manager::UnixDomainCM, params::Dict, launched::Array, c::Condition)
 #    println("launch $(manager.np)")
+    cookie = Base.cluster_cookie()
     for i in 1:manager.np
         sockname = tempname()
         try
-            cmd = `$(params[:exename]) $(@__FILE__) udwrkr $sockname`
+            cmd = `$(params[:exename]) $(@__FILE__) udwrkr $sockname $cookie`
             io, pobj = open(cmd, "r")
 
             wconfig = WorkerConfig()
@@ -43,7 +44,7 @@ function connect(manager::UnixDomainCM, pid::Int, config::WorkerConfig)
             if isa(address, Tuple)
                 sock = connect(address...)
             else
-                sock = connect(ascii(address))
+                sock = connect(address)
             end
             return (sock, sock)
         catch e
@@ -58,10 +59,10 @@ function connect(manager::UnixDomainCM, pid::Int, config::WorkerConfig)
 end
 
 # WORKER
-function start_worker(sockname)
-    Base.init_worker(UnixDomainCM(0))
+function start_worker(sockname, cookie)
+    Base.init_worker(cookie, UnixDomainCM(0))
 
-    srvr = listen(ascii(sockname))
+    srvr = listen(sockname)
     while true
         sock = accept(srvr)
         Base.process_messages(sock, sock)
@@ -87,5 +88,5 @@ end
 
 if (length(ARGS) > 0) && (ARGS[1] == "udwrkr")
     # script has been launched as a worker
-    start_worker(ARGS[2])
+    start_worker(ARGS[2], ARGS[3])
 end

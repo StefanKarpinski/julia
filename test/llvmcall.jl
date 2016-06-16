@@ -143,19 +143,15 @@ confuse_declname_parsing()
 
 
 module ObjLoadTest
-    using Base.Test
-    using Base.llvmcall
-    here = dirname(@__FILE__)
+    using Base: Test, llvmcall, @ccallable
     didcall = false
-    function callback()
+    @ccallable Void function jl_the_callback()
         global didcall
         didcall = true
         nothing
     end
-    Base.ccallable(callback,Void,Tuple{},:jl_the_callback)
-    Base.ccallable(callback,Void,Tuple{},:_jl_the_callback)
     # Make sure everything up until here gets compiled
-    callback(); didcall = false
+    jl_the_callback(); didcall = false
     function do_the_call()
         llvmcall(
         (""" declare void @jl_the_callback()""",
@@ -166,4 +162,20 @@ module ObjLoadTest
     end
     do_the_call()
     @test didcall
+end
+
+# Test for proper parenting
+if VersionNumber(Base.libllvm_version) >= v"3.6" # llvm 3.6 changed the syntax for a gep, so just ignore this test on older versions
+    local foo
+    function foo()
+        # this IR snippet triggers an optimization relying
+        # on the llvmcall function having a parent module
+        Base.llvmcall(
+         """%1 = getelementptr i64, i64* null, i64 1
+            ret void""",
+        Void, Tuple{})
+    end
+    code_llvm(DevNull, foo, ())
+else
+    println("INFO: skipping gep parentage test on llvm < 3.6")
 end

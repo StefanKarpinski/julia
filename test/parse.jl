@@ -64,7 +64,7 @@ macro test999_str(args...); args; end
 @test_throws ParseError parse("sqrt(16)2")
 @test_throws ParseError parse("x' y")
 @test_throws ParseError parse("x 'y")
-@test parse("x'y") == Expr(:call, :*, Expr(symbol("'"), :x), :y)
+@test parse("x'y") == Expr(:call, :*, Expr(Symbol("'"), :x), :y)
 
 # issue #8301
 @test_throws ParseError parse("&*s")
@@ -90,10 +90,8 @@ macro test999_str(args...); args; end
 # issue #10997
 @test parse(":(x.\$f[i])") == Expr(:quote,
                                    Expr(:ref,
-                                        Expr(symbol("."), :x,
-                                             Expr(:$, Expr(:call, TopNode(:Expr),
-                                                           QuoteNode(:quote),
-                                                           :f))),
+                                        Expr(Symbol("."), :x,
+                                             QuoteNode(Expr(:$, :f))),
                                         :i))
 
 # issue #10994
@@ -123,7 +121,7 @@ macro test999_str(args...); args; end
                                                 Expr(:import, :A, :c, :d)))
 
 # issue #11332
-@test parse("export \$(symbol(\"A\"))") == :(export $(Expr(:$, :(symbol("A")))))
+@test parse("export \$(Symbol(\"A\"))") == :(export $(Expr(:$, :(Symbol("A")))))
 @test parse("export \$A") == :(export $(Expr(:$, :A)))
 @test parse("using \$a.\$b") == Expr(:using, Expr(:$, :a), Expr(:$, :b))
 @test parse("using \$a.\$b, \$c") == Expr(:toplevel, Expr(:using, Expr(:$, :a),
@@ -148,8 +146,8 @@ macro test999_str(args...); args; end
 @test parseall("""
 macro f(args...) end; @f ""
 """) == Expr(:toplevel,
-            Expr(:macro, Expr(:call, :f, Expr(:..., :args)), Expr(:block,)),
-            Expr(:macrocall, symbol("@f"), ""))
+             Expr(:macro, Expr(:call, :f, Expr(:..., :args)), Expr(:block, Expr(:line, 1, :none))),
+             Expr(:macrocall, Symbol("@f"), ""))
 
 # blocks vs. tuples
 @test parse("()") == Expr(:tuple)
@@ -326,8 +324,8 @@ end
 # pr #13078
 @test parse("a in b in c") == Expr(:comparison, :a, :in, :b, :in, :c)
 @test parse("a||b→c&&d") == Expr(:call, :→,
-                                 Expr(symbol("||"), :a, :b),
-                                 Expr(symbol("&&"), :c, :d))
+                                 Expr(Symbol("||"), :a, :b),
+                                 Expr(Symbol("&&"), :c, :d))
 
 # issue #11988 -- normalize \r and \r\n in literal strings to \n
 @test "foo\nbar" == parse("\"\"\"\r\nfoo\r\nbar\"\"\"") == parse("\"\"\"\nfoo\nbar\"\"\"") == parse("\"\"\"\rfoo\rbar\"\"\"") == parse("\"foo\r\nbar\"") == parse("\"foo\rbar\"") == parse("\"foo\nbar\"")
@@ -396,3 +394,137 @@ test_parseerror("0b", "invalid numeric constant \"0b\"")
 test_parseerror("0o", "invalid numeric constant \"0o\"")
 test_parseerror("0x0.1", "hex float literal must contain \"p\" or \"P\"")
 test_parseerror("0x1.0p", "invalid numeric constant \"0x1.0\"")
+
+# issue #15798
+@test expand(Base.parse_input_line("""
+              try = "No"
+           """)) == Expr(:error, "unexpected \"=\"")
+
+# issue #15763
+# TODO enable post-0.5
+#test_parseerror("if\nfalse\nend", "missing condition in \"if\" at none:1")
+test_parseerror("if false\nelseif\nend", "missing condition in \"elseif\" at none:2")
+
+# issue #15828
+@test expand(parse("x...")) == Expr(:error, "\"...\" expression outside call")
+
+# issue #15830
+@test expand(parse("foo(y = (global x)) = y")) == Expr(:error, "misplaced \"global\" declaration")
+
+# issue #15844
+function f15844(x)
+    x
+end
+
+g15844 = let
+    local function f15844(x::Int32)
+        2x
+    end
+end
+
+function add_method_to_glob_fn!()
+    global function f15844(x::Int64)
+        3x
+    end
+end
+
+add_method_to_glob_fn!()
+@test g15844 !== f15844
+@test g15844(Int32(1)) == 2
+@test f15844(Int32(1)) == 1
+@test f15844(Int64(1)) == 3
+
+# issue #15661
+@test_throws ParseError parse("function catch() end")
+@test_throws ParseError parse("function end() end")
+@test_throws ParseError parse("function finally() end")
+
+# PR #16170
+@test expand(parse("true(x) = x")) == Expr(:error, "invalid function name \"true\"")
+@test expand(parse("false(x) = x")) == Expr(:error, "invalid function name \"false\"")
+
+# issue #16355
+@test expand(:(f(d:Int...)=nothing)) == Expr(:error, "\"d:Int\" is not a valid function argument name")
+
+# issue #16517
+@test (try error(); catch 0; end) === 0
+@test (try error(); catch false; end) === false  # false and true are Bool literals, not variables
+@test (try error(); catch true; end) === true
+
+# issue #16671
+@test parse("1.") === 1.0
+
+# issue #16672
+let isline(x) = isa(x,Expr) && x.head === :line
+    @test count(isline, parse("begin end").args) == 1
+    @test count(isline, parse("begin; end").args) == 1
+    @test count(isline, parse("begin; x+2; end").args) == 1
+    @test count(isline, parse("begin; x+2; y+1; end").args) == 2
+end
+
+# issue #16736
+let
+    local lineoffset0 = @__LINE__ + 1
+    local lineoffset1 = @__LINE__
+    local lineoffset2 = @__LINE__ - 1
+    @test lineoffset0 == lineoffset1 == lineoffset2
+end
+
+# issue #16686
+@test parse("try x
+             catch test()
+                 y
+             end") == Expr(:try,
+                           Expr(:block,
+                                Expr(:line, 1, :none),
+                                :x),
+                           false,
+                           Expr(:block,
+                                Expr(:line, 2, :none),
+                                Expr(:call, :test),
+                                Expr(:line, 3, :none),
+                                :y))
+
+# test that pre 0.5 deprecated syntax is a parse error
+@test_throws ParseError parse("Int [1,2,3]")
+@test_throws ParseError parse("Int [x for x in 1:10]")
+@test_throws ParseError parse("foo (x) = x")
+@test_throws ParseError parse("foo {T<:Int}(x::T) = x")
+
+@test_throws ParseError parse("Foo .bar")
+
+@test_throws ParseError parse("import x .y")
+@test_throws ParseError parse("using x .y")
+
+@test_throws ParseError parse("--x")
+@test_throws ParseError parse("stagedfunction foo(x); end")
+
+#@test_throws ParseError parse("{1,2,3}")
+#@test_throws ParseError parse("{1 2 3 4}")
+#@test_throws ParseError parse("{1,2; 3,4}")
+@test_throws ParseError parse("{x for x in 1:10}")
+@test_throws ParseError parse("{x=>y for (x,y) in zip([1,2,3],[4,5,6])}")
+#@test_throws ParseError parse("{:a=>1, :b=>2}")
+
+# this now is parsed as getindex(Pair{Any,Any}, ...)
+@test_throws MethodError eval(parse("(Any=>Any)[]"))
+@test_throws MethodError eval(parse("(Any=>Any)[:a=>1,:b=>2]"))
+# to be removed post 0.5
+#@test_throws MethodError eval(parse("(Any=>Any)[x=>y for (x,y) in zip([1,2,3],[4,5,6])]"))
+
+# issue #16720
+let err = try
+    include_string("module A
+
+       function broken()
+
+           x[1] = some_func(
+
+       end
+
+       end")
+    catch e
+        e
+    end
+    @test err.line == 7
+end

@@ -4,7 +4,7 @@ using Base.Test
 
 function redirected_stderr()
     rd, wr = redirect_stderr()
-    @async readall(rd) # make sure the kernel isn't being forced to buffer the output
+    @async readstring(rd) # make sure the kernel isn't being forced to buffer the output
     nothing
 end
 
@@ -20,16 +20,52 @@ try
     write(Foo_file,
           """
           __precompile__(true)
+
           module $Foo_module
-          @doc "foo function" foo(x) = x + 1
-          include_dependency("foo.jl")
-          include_dependency("foo.jl")
-          module Bar
-          @doc "bar function" bar(x) = x + 2
-          include_dependency("bar.jl")
-          end
+              # test that docs get reconnected
+              @doc "foo function" foo(x) = x + 1
+              include_dependency("foo.jl")
+              include_dependency("foo.jl")
+              module Bar
+                  @doc "bar function" bar(x) = x + 2
+                  include_dependency("bar.jl")
+              end
+
+              # test that types and methods get reconnected correctly
+              # issue 16529 (adding a method to a type with no instances)
+              (::Task)(::UInt8, ::UInt16, ::UInt32) = 2
+
+              # issue 16471 (capturing references to an kwfunc)
+              Base.Test.@test_throws ErrorException Core.kwfunc(Base.nothing)
+              Base.nothing(::UInt8, ::UInt16, ::UInt32; x = 52) = x
+              const nothingkw = Core.kwfunc(Base.nothing)
+
+              # issue 16908 (some complicated types and external method definitions)
+              abstract CategoricalPool{T, R <: Integer, V}
+              abstract CategoricalValue{T, R <: Integer}
+              immutable NominalPool{T, R <: Integer, V} <: CategoricalPool{T, R, V}
+                  index::Vector{T}
+                  invindex::Dict{T, R}
+                  order::Vector{R}
+                  ordered::Vector{T}
+                  valindex::Vector{V}
+              end
+              immutable NominalValue{T, R <: Integer} <: CategoricalValue{T, R}
+                  level::R
+                  pool::NominalPool{T, R, NominalValue{T, R}}
+              end
+              immutable OrdinalValue{T, R <: Integer} <: CategoricalValue{T, R}
+                  level::R
+                  pool::NominalPool{T, R, NominalValue{T, R}}
+              end
+              (::Union{Type{NominalValue}, Type{OrdinalValue}})() = 1
+              (::Union{Type{NominalValue{T}}, Type{OrdinalValue{T}}}){T}() = 2
+              (::Type{Vector{NominalValue{T, R}}}){T, R}() = 3
+              (::Type{Vector{NominalValue{T, T}}}){T}() = 4
+              (::Type{Vector{NominalValue{Int, Int}}})() = 5
           end
           """)
+    @test_throws ErrorException Core.kwfunc(Base.nothing) # make sure `nothing` didn't have a kwfunc (which would invalidate the attempted test)
 
     # Issue #12623
     @test __precompile__(true) === nothing
@@ -38,7 +74,7 @@ try
     cachefile = joinpath(dir, "$Foo_module.ji")
 
     # use _require_from_serialized to ensure that the test fails if
-    # the module doesn't load from the image:
+    # the module doesn't reload from the image:
     try
         redirected_stderr()
         @test nothing !== Base._require_from_serialized(myid(), Foo_module, #=broadcast-load=#false)
@@ -58,6 +94,22 @@ try
         @test sort(deps[1]) == map(s -> (s, Base.module_uuid(eval(s))),
                                    [:Base,:Core,:Main])
         @test map(x -> x[1], sort(deps[2])) == [Foo_file,joinpath(dir,"bar.jl"),joinpath(dir,"foo.jl")]
+
+        @test current_task()(0x01, 0x4000, 0x30031234) == 2
+        @test nothing(0x01, 0x4000, 0x30031234) == 52
+        @test nothing(0x01, 0x4000, 0x30031234; x = 9142) == 9142
+        @test Foo.nothingkw === Core.kwfunc(Base.nothing)
+
+        @test Foo.NominalValue() == 1
+        @test Foo.OrdinalValue() == 1
+        @test Foo.NominalValue{Int}() == 2
+        @test Foo.OrdinalValue{Int}() == 2
+        let T = Vector{Foo.NominalValue{Int}}
+            @test isa(T(), T)
+        end
+        @test Vector{Foo.NominalValue{Int32, Int64}}() == 3
+        @test Vector{Foo.NominalValue{UInt, UInt}}() == 4
+        @test Vector{Foo.NominalValue{Int, Int}}() == 5
     end
 
     Baz_file = joinpath(dir, "Baz.jl")
@@ -127,7 +179,6 @@ finally
 end
 
 # test --compilecache=no command line option
-dir = mktempdir()
 let dir = mktempdir(),
     Time_module = :Time4b3a94a1a081a8cb
 
@@ -178,7 +229,7 @@ let module_name = string("a",randstring())
     code = """module $(module_name)\nend\n"""
     write(file_name, code)
     reload(module_name)
-    @test typeof(eval(symbol(module_name))) == Module
+    @test typeof(eval(Symbol(module_name))) == Module
     deleteat!(LOAD_PATH,1)
     rm(file_name)
 end

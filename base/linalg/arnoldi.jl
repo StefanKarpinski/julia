@@ -180,7 +180,7 @@ function _eigs(A, B;
 
     if isa(which,AbstractString)
         warn("Use symbols instead of strings for specifying which eigenvalues to compute")
-        which=symbol(which)
+        which=Symbol(which)
     end
     if (which != :LM && which != :SM && which != :LR && which != :SR &&
         which != :LI && which != :SI && which != :BE)
@@ -237,7 +237,7 @@ function _eigs(A, B;
     end
 
     # Refer to ex-*.doc files in ARPACK/DOCUMENTS for calling sequence
-    matvecA(x) = A * x
+    matvecA!(y, x) = A_mul_B!(y, A, x)
     if !isgeneral           # Standard problem
         matvecB = x -> x
         if !isshift         #    Regular mode
@@ -263,7 +263,7 @@ function _eigs(A, B;
 
     # Compute the Ritz values and Ritz vectors
     (resid, v, ldv, iparam, ipntr, workd, workl, lworkl, rwork, TOL) =
-       ARPACK.aupd_wrapper(T, matvecA, matvecB, solveSI, n, sym, iscmplx, bmat, nev, ncv, whichstr, tol, maxiter, mode, v0)
+       ARPACK.aupd_wrapper(T, matvecA!, matvecB, solveSI, n, sym, iscmplx, bmat, nev, ncv, whichstr, tol, maxiter, mode, v0)
 
     # Postprocessing to get eigenvalues and eigenvectors
     output = ARPACK.eupd_wrapper(T, n, sym, iscmplx, bmat, nev, whichstr, ritzvec, TOL,
@@ -294,8 +294,12 @@ function SVDOperator{T}(A::AbstractMatrix{T})
     SVDOperator{Tnew,typeof(Anew)}(Anew)
 end
 
-## v = [ left_singular_vector; right_singular_vector ]
-*{T,S}(s::SVDOperator{T,S}, v::Vector{T}) = [s.X * v[s.m+1:end]; s.X' * v[1:s.m]]
+function A_mul_B!{T,S}(u::StridedVector{T}, s::SVDOperator{T,S}, v::StridedVector{T})
+    a, b = s.m, length(v)
+    A_mul_B!(sub(u,1:a), s.X, sub(v,a+1:b)) # left singular vector
+    Ac_mul_B!(sub(u,a+1:b), s.X, sub(v,1:a)) # right singular vector
+    u
+end
 size(s::SVDOperator)  = s.m + s.n, s.m + s.n
 issymmetric(s::SVDOperator) = true
 
@@ -307,7 +311,7 @@ function svds{T}(A::AbstractMatrix{T}; kwargs...)
 end
 
 """
-    svds(A; nsv=6, ritzvec=true, tol=0.0, maxiter=1000) -> ([left_sv,] s, [right_sv,] nconv, niter, nmult, resid)
+    svds(A; nsv=6, ritzvec=true, tol=0.0, maxiter=1000, ncv=2*nsv, u0=zeros((0,)), v0=zeros((0,))) -> (SVD([left_sv,] s, [right_sv,]), nconv, niter, nmult, resid)
 
 Computes the largest singular values `s` of `A` using implicitly restarted Lanczos
 iterations derived from [`eigs`](:func:`eigs`).
@@ -318,17 +322,18 @@ iterations derived from [`eigs`](:func:`eigs`).
   as a subtype of `AbstractArray`, e.g., a sparse matrix, or any other type
   supporting the four methods `size(A)`, `eltype(A)`, `A * vector`, and
   `A' * vector`.
-* `nsv`: Number of singular values.
+* `nsv`: Number of singular values. Default: 6.
 * `ritzvec`: If `true`, return the left and right singular vectors `left_sv` and `right_sv`.
    If `false`, omit the singular vectors. Default: `true`.
 * `tol`: tolerance, see [`eigs`](:func:`eigs`).
-* `maxiter`: Maximum number of iterations, see [`eigs`](:func:`eigs`).
+* `maxiter`: Maximum number of iterations, see [`eigs`](:func:`eigs`). Default: 1000.
+* `ncv`: Maximum size of the Krylov subspace, see [`eigs`](:func:`eigs`) (there called `nev`). Default: `2*nsv`.
+* `u0`: Initial guess for the first left Krylov vector. It may have length `m` (the first dimension of `A`), or 0.
+* `v0`: Initial guess for the first right Krylov vector. It may have length `n` (the second dimension of `A`), or 0.
 
 **Outputs**
 
-* `left_sv`: Left singular vectors (only if `ritzvec = true`).
-* `s`: A vector of length `nsv` containing the requested singular values.
-* `right_sv`: Right singular vectors (only if `ritzvec = true`).
+* `svd`: An `SVD` object containing the left singular vectors, the requested values, and the right singular vectors. If `ritzvec = false`, the left and right singular vectors will be empty.
 * `nconv`: Number of converged singular values.
 * `niter`: Number of iterations.
 * `nmult`: Number of matrix--vector products used.
@@ -349,23 +354,40 @@ Lanczos tridiagonalization on the Hermitian matrix
 plus and minus the singular values of ``A``.
 """
 svds(A; kwargs...) = _svds(A; kwargs...)
-function _svds(X; nsv::Int = 6, ritzvec::Bool = true, tol::Float64 = 0.0, maxiter::Int = 1000)
+function _svds(X; nsv::Int = 6, ritzvec::Bool = true, tol::Float64 = 0.0, maxiter::Int = 1000, ncv::Int = 2*nsv, u0::Vector=zeros(eltype(X),(0,)), v0::Vector=zeros(eltype(X),(0,)))
     if nsv < 1
         throw(ArgumentError("number of singular values (nsv) must be ≥ 1, got $nsv"))
     end
     if nsv > minimum(size(X))
         throw(ArgumentError("number of singular values (nsv) must be ≤ $(minimum(size(X))), got $nsv"))
     end
+    m,n = size(X)
     otype = eltype(X)
-    ex    = eigs(SVDOperator(X), I; ritzvec = ritzvec, nev = 2*nsv, tol = tol, maxiter = maxiter)
-    ind   = [1:2:nsv*2;]
+    padv0 = zeros(eltype(X),(0,))
+    if length(v0) ∉ [0,n]
+        throw(DimensionMismatch("length of v0, the guess for the starting right Krylov vector, must be 0, or $n, got $(length(v0))"))
+    end
+    if length(u0) ∉ [0,m]
+        throw(DimensionMismatch("length of u0, the guess for the starting left Krylov vector, must be 0, or $m, got $(length(u0))"))
+    end
+    if length(v0) == n && length(u0) == m
+        padv0 = [u0; v0]
+    elseif length(v0) == n && length(u0) == 0
+        padv0 = [zeros(otype,m); v0]
+    elseif length(v0) == 0 && length(u0) == m
+        padv0 = [u0; zeros(otype,n) ]
+    end
+    ex    = eigs(SVDOperator(X), I; ritzvec = ritzvec, nev = ncv, tol = tol, maxiter = maxiter, v0=padv0)
+    ind   = [1:2:ncv;]
     sval  = abs(ex[1][ind])
 
-    #The sort is necessary to work around #10329
-    ritzvec || return (sort!(sval, by=real, rev=true), ex[2], ex[3], ex[4], ex[5])
-
-    # calculating singular vectors
-    left_sv  = sqrt(2) * ex[2][ 1:size(X,1),     ind ] .* sign(ex[1][ind]')
-    right_sv = sqrt(2) * ex[2][ size(X,1)+1:end, ind ]
-    return (left_sv, sval, right_sv, ex[3], ex[4], ex[5], ex[6])
+    if ritzvec
+        # calculating singular vectors
+        left_sv  = sqrt(2) * ex[2][ 1:size(X,1),     ind ] .* sign(ex[1][ind]')
+        right_sv = sqrt(2) * ex[2][ size(X,1)+1:end, ind ]
+        return (SVD(left_sv, sval, right_sv), ex[3], ex[4], ex[5], ex[6])
+    else
+        #The sort is necessary to work around #10329
+        return (SVD(zeros(eltype(sval),n,0),sort!(sval, by=real, rev=true),zeros(eltype(sval),0,m)), ex[2], ex[3], ex[4], ex[5])
+    end
 end

@@ -9,40 +9,40 @@
        (vararg? (cadadr e))))
 
 (define (wrap-with-splice x)
-  `(call (top _expr) (inert $)
-         (call (top _expr) (inert tuple)
-               (call (top _expr) (inert |...|) ,x))))
+  `(call (core _expr) (inert $)
+         (call (core _expr) (inert tuple)
+               (call (core _expr) (inert |...|) ,x))))
 
 (define (julia-bq-bracket x d)
   (if (splice-expr? x)
       (if (= d 0)
           (cadr (cadr (cadr x)))
-          (list 'cell1d
+          (list 'call '(top vector_any)
                 (wrap-with-splice (julia-bq-expand (cadr (cadr (cadr x))) (- d 1)))))
-      (list 'cell1d (julia-bq-expand x d))))
+      (list 'call '(top vector_any) (julia-bq-expand x d))))
 
 (define (julia-bq-expand x d)
   (cond ((or (eq? x 'true) (eq? x 'false))  x)
-        ((or (symbol? x) (jlgensym? x))     (list 'inert x))
+        ((or (symbol? x) (ssavalue? x))     (list 'inert x))
         ((atom? x)  x)
         ((eq? (car x) 'quote)
-         `(call (top _expr) (inert quote) ,(julia-bq-expand (cadr x) (+ d 1))))
+         `(call (core _expr) (inert quote) ,(julia-bq-expand (cadr x) (+ d 1))))
         ((eq? (car x) '$)
          (if (and (= d 0) (length= x 2))
              (cadr x)
              (if (splice-expr? (cadr x))
-                 `(call (top splicedexpr) (inert $)
+                 `(call (core splicedexpr) (inert $)
                         (call (top append_any) ,(julia-bq-bracket (cadr x) (- d 1))))
-                 `(call (top _expr) (inert $) ,(julia-bq-expand (cadr x) (- d 1))))))
+                 `(call (core _expr) (inert $) ,(julia-bq-expand (cadr x) (- d 1))))))
         ((not (contains (lambda (e) (and (pair? e) (eq? (car e) '$))) x))
          `(copyast (inert ,x)))
         ((not (any splice-expr? x))
-         `(call (top _expr) ,.(map (lambda (ex) (julia-bq-expand ex d)) x)))
+         `(call (core _expr) ,.(map (lambda (ex) (julia-bq-expand ex d)) x)))
         (else
          (let loop ((p (cdr x)) (q '()))
            (if (null? p)
                (let ((forms (reverse q)))
-                 `(call (top splicedexpr) ,(julia-bq-expand (car x) d)
+                 `(call (core splicedexpr) ,(julia-bq-expand (car x) d)
                         (call (top append_any) ,@forms)))
                (loop (cdr p) (cons (julia-bq-bracket (car p) d) q)))))))
 
@@ -168,32 +168,40 @@
   (if (symbol? e) e
       (cadr e)))
 
-(define (new-expansion-env-for x env)
-  (let ((globals (find-declared-vars-in-expansion x 'global)))
-    (receive
-     (pairs vnames) (separate pair? (vars-introduced-by x))
-     (let ((v (diff (delete-duplicates
-                     (append! (find-declared-vars-in-expansion x 'local)
-                              (find-assigned-vars-in-expansion x)
-                              vnames))
-                    globals)))
-       (append!
-        pairs
-        (filter (lambda (v) (not (assq (car v) env)))
-                (append!
-                 (pair-with-gensyms v)
-                 (map (lambda (v) (cons v v))
-                      (diff (keywords-introduced-by x) globals))))
-        env)))))
+(define (new-expansion-env-for x env (outermost #f))
+  (let ((introduced (pattern-expand1 vars-introduced-by-patterns x)))
+    (if (or (atom? x)
+            (and (not outermost)
+                 (not (and (pair? introduced) (eq? (car introduced) 'varlist)))))
+        env
+        (let ((globals (find-declared-vars-in-expansion x 'global))
+              (vlist (if (and (pair? introduced) (eq? (car introduced) 'varlist))
+                         (cdr introduced)
+                         '())))
+          (receive
+           (pairs vnames) (separate pair? vlist)
+           (let ((v (diff (delete-duplicates
+                           (append! (find-declared-vars-in-expansion x 'local)
+                                    (find-assigned-vars-in-expansion x)
+                                    vnames))
+                          globals)))
+             (append!
+              pairs
+              (filter (lambda (v) (not (assq (car v) env)))
+                      (append!
+                       (pair-with-gensyms v)
+                       (map (lambda (v) (cons v v))
+                            (diff (keywords-introduced-by x) globals))))
+              env)))))))
 
-(define (resolve-expansion-vars-with-new-env x env m inarg)
+(define (resolve-expansion-vars-with-new-env x env m inarg (outermost #f))
   (resolve-expansion-vars-
    x
    (if (and (pair? x) (eq? (car x) 'let))
        ;; let is strange in that it needs both old and new envs within
        ;; the same expression
        env
-       (new-expansion-env-for x env))
+       (new-expansion-env-for x env outermost))
    m inarg))
 
 (define (resolve-expansion-vars- e env m inarg)
@@ -202,13 +210,13 @@
         ((symbol? e)
          (let ((a (assq e env)))
            (if a (cdr a)
-               (if m `(|.| ,m (quote ,e))
+               (if m `(globalref ,m ,e)
                    e))))
         ((or (not (pair? e)) (quoted? e))
          e)
         (else
          (case (car e)
-           ((jlgensym) e)
+           ((ssavalue) e)
            ((escape) (cadr e))
            ((global) (let ((arg (cadr e)))
                        (cond ((symbol? arg) e)
@@ -218,11 +226,11 @@
                                    ,(resolve-expansion-vars-with-new-env (caddr arg) env m inarg))))
                              (else
                               `(global ,(resolve-expansion-vars-with-new-env arg env m inarg))))))
-           ((using import importall export meta) (map unescape e))
+           ((using import importall export meta line inbounds boundscheck simdloop) (map unescape e))
            ((macrocall)
             (if (or (eq? (cadr e) '@label) (eq? (cadr e) '@goto)) e
                 `(macrocall ,.(map (lambda (x)
-                                     (resolve-expansion-vars- x env m inarg))
+                                     (resolve-expansion-vars-with-new-env x env m inarg))
                                    (cdr e)))))
            ((symboliclabel) e)
            ((symbolicgoto) e)
@@ -358,12 +366,6 @@
                                (find-assigned-vars-in-expansion x #f))
                              e)))))
 
-(define (vars-introduced-by e)
-  (let ((v (pattern-expand1 vars-introduced-by-patterns e)))
-    (if (and (pair? v) (eq? (car v) 'varlist))
-        (cdr v)
-        '())))
-
 (define (keywords-introduced-by e)
   (let ((v (pattern-expand1 keywords-introduced-by-patterns e)))
     (if (and (pair? v) (eq? (car v) 'varlist))
@@ -374,7 +376,7 @@
   ;; expand binding form patterns
   ;; keep track of environment, rename locals to gensyms
   ;; and wrap globals in (getfield module var) for macro's home module
-  (resolve-expansion-vars-with-new-env e '() m #f))
+  (resolve-expansion-vars-with-new-env e '() m #f #t))
 
 (define (find-symbolic-labels e)
   (let ((defs (table))

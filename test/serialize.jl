@@ -2,6 +2,11 @@
 
 using Base.Test
 
+# Check that serializer hasn't gone out-of-frame
+@test Serializer.sertag(Symbol) == 2
+@test Serializer.sertag(()) == 46
+@test Serializer.sertag(false) == 122
+
 function create_serialization_stream(f::Function)
     s = IOBuffer()
     f(s)
@@ -74,7 +79,7 @@ end
 
 # Symbol
 create_serialization_stream() do s
-    gensym(len) = symbol(repeat("A", len))
+    gensym(len) = Symbol(repeat("A", len))
 
     smbl = gensym(1)
     serialize(s, smbl)
@@ -94,7 +99,7 @@ end
 # Module
 create_serialization_stream() do s # user-defined module
     mod = b"SomeModule"
-    modstring = bytestring(mod)
+    modstring = String(mod)
     eval(parse("module $(modstring); end"))
     modtype = eval(parse("$(modstring)"))
     serialize(s, modtype)
@@ -204,7 +209,7 @@ create_serialization_stream() do s # small 1d array
     arr4 = reshape([true, false, false, false, true, false, false, false, true], 3, 3)
     serialize(s, arr4)       # boolean array
 
-    arr5 = Array(TA1, 3)
+    arr5 = Array{TA1}(3)
     arr5[2] = TA1(0x01)
     serialize(s, arr5)
 
@@ -238,6 +243,7 @@ module ArrayWrappers
 immutable ArrayWrapper{T,N,A<:AbstractArray} <: AbstractArray{T,N}
     data::A
 end
+ArrayWrapper{T,N}(data::AbstractArray{T,N}) = ArrayWrapper{T,N,typeof(data)}(data)
 Base.size(A::ArrayWrapper) = size(A.data)
 Base.size(A::ArrayWrapper, d) = size(A.data, d)
 Base.getindex(A::ArrayWrapper, i::Real...) = getindex(A.data, i...)
@@ -246,7 +252,7 @@ end
 
 let A = rand(3,4)
     for B in (sub(A, :, 2:4), slice(A, 2, 1:3))
-        C = ArrayWrappers.ArrayWrapper{Float64,2,typeof(B)}(B)
+        C = ArrayWrappers.ArrayWrapper(B)
         io = IOBuffer()
         serialize(io, C)
         seek(io, 0)
@@ -378,4 +384,31 @@ let b = IOBuffer()
     seekstart(b)
     c = deserialize(b)
     @test isa(c,B15163) && c.x == [1]
+end
+
+# issue #15849
+let b = IOBuffer()
+    vt = Tuple[(1,)]
+    serialize(b, vt)
+    seekstart(b)
+    @test deserialize(b) == vt
+end
+
+# issue #1770
+let
+    a = ['T', 'e', 's', 't']
+    f = IOBuffer()
+    serialize(f, a)
+    seek(f, 0)
+    @test deserialize(f) == a
+    f = IOBuffer()
+    serialize(f, a)
+    seek(f, 0)
+    @test deserialize(f) == a
+
+    # issue #4414
+    seek(f,0)
+    serialize(f, :β)
+    seek(f,0)
+    @test deserialize(f) === :β
 end

@@ -59,7 +59,7 @@ end
 # hashing collections (e.g. issue #6870)
 vals = Any[
     [1,2,3,4], [1 3;2 4], Any[1,2,3,4], [1,3,2,4],
-    [1,0], [true,false], bitpack([true,false]),
+    [1,0], [true,false], BitArray([true,false]),
     Set([1,2,3,4]),
     Set([1:10;]),                # these lead to different key orders
     Set([7,9,4,10,2,3,5,8,6,1]), #
@@ -67,7 +67,7 @@ vals = Any[
     (1,2,3,4), (1.0,2.0,3.0,4.0), (1,3,2,4),
     ("a","b"), (SubString("a",1,1), SubString("b",1,1)),
     # issue #6900
-    [x => x for x in 1:10],
+    Dict(x => x for x in 1:10),
     Dict(7=>7,9=>9,4=>4,10=>10,2=>2,3=>3,8=>8,5=>5,6=>6,1=>1),
     [], [1], [2], [1, 1], [1, 2], [1, 3], [2, 2], [1, 2, 2], [1, 3, 3],
     zeros(2, 2), spzeros(2, 2), eye(2, 2), speye(2, 2),
@@ -95,12 +95,25 @@ let a = QuoteNode(1), b = QuoteNode(1.0)
     @test (hash(a)==hash(b)) == (a==b)
 end
 
-let a = Expr(:block, Slot(1, Any)),
-    b = Expr(:block, Slot(1, Any)),
-    c = Expr(:block, Slot(3, Any))
+let a = Expr(:block, TypedSlot(1, Any)),
+    b = Expr(:block, TypedSlot(1, Any)),
+    c = Expr(:block, TypedSlot(3, Any))
     @test a == b && hash(a) == hash(b)
     @test a != c && hash(a) != hash(c)
     @test b != c && hash(b) != hash(c)
 end
 
 @test hash(Dict(),hash(Set())) != hash(Set(),hash(Dict()))
+
+# issue 15659
+for prec in [3, 11, 15, 16, 31, 32, 33, 63, 64, 65, 254, 255, 256, 257, 258, 1023, 1024, 1025],
+    v in Any[-0.0, 0, 1, -1, 1//10, 2//10, 3//10, 1//2, pi]
+    setprecision(prec) do
+        x = convert(BigFloat, v)
+        @test precision(x) == prec
+        num, pow, den = Base.decompose(x)
+        y = num*big(2.0)^pow/den
+        @test precision(y) == prec
+        @test isequal(x, y)
+    end
+end

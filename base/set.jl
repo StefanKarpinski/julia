@@ -104,6 +104,12 @@ const ⊆ = issubset
 ⊊(l::Set, r::Set) = <(l, r)
 ⊈(l::Set, r::Set) = !⊆(l, r)
 
+"""
+    unique(itr)
+
+Returns an array containing one value from `itr` for each unique value,
+as determined by `isequal`.
+"""
 function unique(C)
     out = Vector{eltype(C)}()
     seen = Set{eltype(C)}()
@@ -134,6 +140,27 @@ function unique(f::Callable, C)
     end
     out
 end
+
+"""
+    allunique(itr)
+
+Return `true` if all values from `itr` are distinct when compared with `isequal`.
+"""
+function allunique(C)
+    seen = Set{eltype(C)}()
+    for x in C
+        if in(x, seen)
+            return false
+        else
+            push!(seen, x)
+        end
+    end
+    true
+end
+
+allunique(::Set) = true
+
+allunique{T}(r::Range{T}) = (step(r) != zero(T)) || (length(r) <= one(T))
 
 function filter(f, s::Set)
     u = similar(s)

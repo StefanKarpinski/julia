@@ -1,7 +1,7 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
 module Rounding
-include(UTF8String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "fenv_constants.jl".data))) # include($BUILDROOT/base/fenv_constants.jl)
+include(String(vcat(length(Core.ARGS)>=2?Core.ARGS[2].data:"".data, "fenv_constants.jl".data))) # include($BUILDROOT/base/fenv_constants.jl)
 
 export
     RoundingMode, RoundNearest, RoundToZero, RoundUp, RoundDown, RoundFromZero,
@@ -67,7 +67,7 @@ end
 # Assumes conversion is performed by rounding to nearest value.
 
 # To avoid ambiguous dispatch with methods in mpfr.jl:
-call{T<:AbstractFloat}(::Type{T},x::Real,r::RoundingMode) = _convert_rounding(T,x,r)
+(::Type{T}){T<:AbstractFloat}(x::Real,r::RoundingMode) = _convert_rounding(T,x,r)
 
 _convert_rounding{T<:AbstractFloat}(::Type{T},x::Real,r::RoundingMode{:Nearest}) = convert(T,x)
 function _convert_rounding{T<:AbstractFloat}(::Type{T},x::Real,r::RoundingMode{:Down})

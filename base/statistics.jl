@@ -2,20 +2,29 @@
 
 ##### mean #####
 
-function mean(iterable)
+"""
+    mean(f::Function, v)
+
+Apply the function `f` to each element of `v` and take the mean.
+"""
+function mean(f::Callable, iterable)
     state = start(iterable)
     if done(iterable, state)
         throw(ArgumentError("mean of empty collection undefined: $(repr(iterable))"))
     end
     count = 1
-    total, state = next(iterable, state)
+    value, state = next(iterable, state)
+    f_value = f(value)
+    total = f_value + zero(f_value)
     while !done(iterable, state)
         value, state = next(iterable, state)
-        total += value
+        total += f(value)
         count += 1
     end
     return total/count
 end
+mean(iterable) = mean(identity, iterable)
+mean(f::Callable, A::AbstractArray) = sum(f, A) / length(A)
 mean(A::AbstractArray) = sum(A) / length(A)
 
 function mean!{T}(R::AbstractArray{T}, A::AbstractArray)
@@ -76,69 +85,49 @@ function var(iterable; corrected::Bool=true, mean=nothing)
     end
 end
 
-function varzm{T}(A::AbstractArray{T}; corrected::Bool=true)
-    n = length(A)
-    n == 0 && return convert(real(momenttype(T)), NaN)
-    return sumabs2(A) / (n - Int(corrected))
-end
-
-function varzm!{S}(R::AbstractArray{S}, A::AbstractArray; corrected::Bool=true)
-    if isempty(A)
-        fill!(R, convert(S, NaN))
-    else
-        rn = div(length(A), length(r)) - Int(corrected)
-        scale!(sumabs2!(R, A; init=true), convert(S, 1/rn))
-    end
-    return R
-end
-
-varzm{T}(A::AbstractArray{T}, region; corrected::Bool=true) =
-    varzm!(reducedim_initarray(A, region, 0, real(momenttype(T))), A; corrected=corrected)
-
-immutable CentralizedAbs2Fun{T<:Number} <: Func{1}
-    m::T
-end
-(f::CentralizedAbs2Fun)(x) = abs2(x - f.m)
+centralizedabs2fun(m::Number) = x -> abs2(x - m)
 centralize_sumabs2(A::AbstractArray, m::Number) =
-    mapreduce(CentralizedAbs2Fun(m), AddFun(), A)
+    mapreduce(centralizedabs2fun(m), +, A)
 centralize_sumabs2(A::AbstractArray, m::Number, ifirst::Int, ilast::Int) =
-    mapreduce_impl(CentralizedAbs2Fun(m), AddFun(), A, ifirst, ilast)
+    mapreduce_impl(centralizedabs2fun(m), +, A, ifirst, ilast)
 
-@generated function centralize_sumabs2!{S,T,N}(R::AbstractArray{S}, A::AbstractArray{T,N}, means::AbstractArray)
-    quote
-        # following the implementation of _mapreducedim! at base/reducedim.jl
-        lsiz = check_reducedims(R,A)
-        isempty(R) || fill!(R, zero(S))
-        isempty(A) && return R
-        @nextract $N sizeR d->size(R,d)
-        sizA1 = size(A, 1)
+function centralize_sumabs2!{S,T,N}(R::AbstractArray{S}, A::AbstractArray{T,N}, means::AbstractArray)
+    # following the implementation of _mapreducedim! at base/reducedim.jl
+    lsiz = check_reducedims(R,A)
+    isempty(R) || fill!(R, zero(S))
+    isempty(A) && return R
+    sizA1 = size(A, 1)
 
-        if has_fast_linear_indexing(A) && lsiz > 16
-            # use centralize_sumabs2, which is probably better tuned to achieve higher performance
-            nslices = div(length(A), lsiz)
-            ibase = 0
-            for i = 1:nslices
-                @inbounds R[i] = centralize_sumabs2(A, means[i], ibase+1, ibase+lsiz)
-                ibase += lsiz
-            end
-        elseif size(R, 1) == 1 && sizA1 > 1
-            # keep the accumulator as a local variable when reducing along the first dimension
-            @nloops $N i d->(d>1? (1:size(A,d)) : (1:1)) d->(j_d = sizeR_d==1 ? 1 : i_d) begin
-                @inbounds r = (@nref $N R j)
-                @inbounds m = (@nref $N means j)
-                for i_1 = 1:sizA1                # fixme (iter): change when #15459 is done
-                    @inbounds r += abs2((@nref $N A i) - m)
-                end
-                @inbounds (@nref $N R j) = r
-            end
-        else
-            # general implementation
-            @nloops $N i A d->(j_d = sizeR_d==1 ? 1 : i_d) begin
-                @inbounds (@nref $N R j) += abs2((@nref $N A i) - (@nref $N means j))
-            end
+    if has_fast_linear_indexing(A) && lsiz > 16
+        nslices = div(length(A), lsiz)
+        ibase = first(linearindices(A))-1
+        for i = 1:nslices
+            @inbounds R[i] = centralize_sumabs2(A, means[i], ibase+1, ibase+lsiz)
+            ibase += lsiz
         end
         return R
     end
+    IRmax = dims_tail(map(last, indices(R)), A)
+    if size(R, 1) == 1 && sizA1 > 1
+        i1 = first(indices(A, 1))
+        @inbounds for IA in CartesianRange(tail(indices(A)))
+            IR = min(IA, IRmax)
+            r = R[i1,IR]
+            m = means[i1,IR]
+            @simd for i in indices(A, 1)
+                r += abs2(A[i,IA] - m)
+            end
+            R[i1,IR] = r
+        end
+    else
+        @inbounds for IA in CartesianRange(tail(indices(A)))
+            IR = min(IA, IRmax)
+            @simd for i in indices(A, 1)
+                R[i,IR] += abs2(A[i,IA] - means[i,IR])
+            end
+        end
+    end
+    return R
 end
 
 function varm{T}(A::AbstractArray{T}, m::Number; corrected::Bool=true)
@@ -162,20 +151,12 @@ varm{T}(A::AbstractArray{T}, m::AbstractArray, region; corrected::Bool=true) =
     varm!(reducedim_initarray(A, region, 0, real(momenttype(T))), A, m; corrected=corrected)
 
 
-function var{T}(A::AbstractArray{T}; corrected::Bool=true, mean=nothing)
+var{T}(A::AbstractArray{T}; corrected::Bool=true, mean=nothing) =
     convert(real(momenttype(T)),
-            mean == 0 ? varzm(A; corrected=corrected) :
-            mean === nothing ? varm(A, Base.mean(A); corrected=corrected) :
-            isa(mean, Number) ? varm(A, mean::Number; corrected=corrected) :
-            throw(ArgumentError("invalid value of mean, $(mean)::$(typeof(mean))")))::real(momenttype(T))
-end
+            varm(A, mean === nothing ? Base.mean(A) : mean; corrected=corrected))
 
-function var(A::AbstractArray, region; corrected::Bool=true, mean=nothing)
-    mean == 0 ? varzm(A, region; corrected=corrected) :
-    mean === nothing ? varm(A, Base.mean(A, region), region; corrected=corrected) :
-    isa(mean, AbstractArray) ? varm(A, mean::AbstractArray, region; corrected=corrected) :
-    throw(ArgumentError("invalid value of mean, $(mean)::$(typeof(mean))"))
-end
+var(A::AbstractArray, region; corrected::Bool=true, mean=nothing) =
+    varm(A, mean === nothing ? Base.mean(A, region) : mean, region; corrected=corrected)
 
 varm(iterable, m::Number; corrected::Bool=true) =
     var(iterable, corrected=corrected, mean=m)
@@ -510,7 +491,7 @@ function median!{T}(v::AbstractVector{T})
 end
 median!{T}(v::AbstractArray{T}) = median!(vec(v))
 
-median{T}(v::AbstractArray{T}) = median!(vec(copy(v)))
+median{T}(v::AbstractArray{T}) = median!(copy!(Array(T, length(v)), v))
 median{T}(v::AbstractArray{T}, region) = mapslices(median!, v, region)
 
 # for now, use the R/S definition of quantile; may want variants later
@@ -580,19 +561,21 @@ end
 @inline function _quantile(v::AbstractVector, p::Real)
     T = float(eltype(v))
     isnan(p) && return T(NaN)
+    0 <= p <= 1 || throw(ArgumentError("input probability out of [0,1] range"))
 
     lv = length(v)
-    index = 1 + (lv-1)*p
-    1 <= index <= lv || error("input probability out of [0,1] range")
+    f0 = (lv-1)*p # 0-based interpolated index
+    t0 = trunc(f0)
+    h = f0 - t0
 
-    indlo = floor(index)
-    i = trunc(Int,indlo)
+    i = trunc(Int,t0) + 1
 
-    if index == indlo
+    if h == 0
         return T(v[i])
     else
-        h = T(index - indlo)
-        return (1-h)*T(v[i]) + h*T(v[i+1])
+        a = T(v[i])
+        b = T(v[i+1])
+        return a + h*(b-a)
     end
 end
 
@@ -613,152 +596,4 @@ for `k = 1:n` where `n = length(v)`. This corresponds to Definition 7 of Hyndman
   *The American Statistician*, Vol. 50, No. 4, pp. 361-365
 """
 quantile(v::AbstractVector, p; sorted::Bool=false) =
-    quantile!(sorted ? v : copy!(similar(v),v), p; sorted=sorted)
-
-
-##### histogram #####
-
-## nice-valued ranges for histograms
-
-function histrange{T<:AbstractFloat,N}(v::AbstractArray{T,N}, n::Integer)
-    nv = length(v)
-    if nv == 0 && n < 0
-        throw(ArgumentError("number of bins must be ≥ 0 for an empty array, got $n"))
-    elseif nv > 0 && n < 1
-        throw(ArgumentError("number of bins must be ≥ 1 for a non-empty array, got $n"))
-    end
-    if nv == 0
-        return 0.0:1.0:0.0
-    end
-    lo, hi = extrema(v)
-    if hi == lo
-        step = 1.0
-    else
-        bw = (hi - lo) / n
-        e = 10.0^floor(log10(bw))
-        r = bw / e
-        if r <= 2
-            step = 2*e
-        elseif r <= 5
-            step = 5*e
-        else
-            step = 10*e
-        end
-    end
-    start = step*(ceil(lo/step)-1)
-    nm1 = ceil(Int,(hi - start)/step)
-    start:step:(start + nm1*step)
-end
-
-function histrange{T<:Integer,N}(v::AbstractArray{T,N}, n::Integer)
-    nv = length(v)
-    if nv == 0 && n < 0
-        throw(ArgumentError("number of bins must be ≥ 0 for an empty array, got $n"))
-    elseif nv > 0 && n < 1
-        throw(ArgumentError("number of bins must be ≥ 1 for a non-empty array, got $n"))
-    end
-    if nv == 0
-        return 0:1:0
-    end
-    if n <= 0
-        throw(ArgumentError("number of bins n=$n must be positive"))
-    end
-    lo, hi = extrema(v)
-    if hi == lo
-        step = 1
-    else
-        bw = (Float64(hi) - Float64(lo)) / n
-        e = 10.0^max(0,floor(log10(bw)))
-        r = bw / e
-        if r <= 1
-            step = e
-        elseif r <= 2
-            step = 2*e
-        elseif r <= 5
-            step = 5*e
-        else
-            step = 10*e
-        end
-    end
-    start = step*(ceil(lo/step)-1)
-    nm1 = ceil(Int,(hi - start)/step)
-    start:step:(start + nm1*step)
-end
-
-## midpoints of intervals
-midpoints(r::Range) = r[1:length(r)-1] + 0.5*step(r)
-midpoints(v::AbstractVector) = [0.5*(v[i] + v[i+1]) for i in 1:length(v)-1]
-
-## hist ##
-function sturges(n)  # Sturges' formula
-    n==0 && return one(n)
-    ceil(Int,log2(n))+1
-end
-
-function hist!{HT}(h::AbstractArray{HT}, v::AbstractVector, edg::AbstractVector; init::Bool=true)
-    n = length(edg) - 1
-    length(h) == n || throw(DimensionMismatch("length(histogram) must equal length(edges) - 1"))
-    if init
-        fill!(h, zero(HT))
-    end
-    for x in v
-        i = searchsortedfirst(edg, x)-1
-        if 1 <= i <= n
-            h[i] += 1
-        end
-    end
-    edg, h
-end
-
-hist(v::AbstractVector, edg::AbstractVector) = hist!(Array(Int, length(edg)-1), v, edg)
-hist(v::AbstractVector, n::Integer) = hist(v,histrange(v,n))
-hist(v::AbstractVector) = hist(v,sturges(length(v)))
-
-function hist!{HT}(H::AbstractArray{HT,2}, A::AbstractMatrix, edg::AbstractVector; init::Bool=true)
-    m, n = size(A)
-    sH = size(H)
-    sE = (length(edg)-1,n)
-    sH == sE || throw(DimensionMismatch("incorrect size of histogram"))
-    if init
-        fill!(H, zero(HT))
-    end
-    for j = 1:n
-        hist!(sub(H, :, j), sub(A, :, j), edg)
-    end
-    edg, H
-end
-
-hist(A::AbstractMatrix, edg::AbstractVector) = hist!(Array(Int, length(edg)-1, size(A,2)), A, edg)
-hist(A::AbstractMatrix, n::Integer) = hist(A,histrange(A,n))
-hist(A::AbstractMatrix) = hist(A,sturges(size(A,1)))
-
-
-## hist2d
-function hist2d!{HT}(H::AbstractArray{HT,2}, v::AbstractMatrix,
-                     edg1::AbstractVector, edg2::AbstractVector; init::Bool=true)
-    size(v,2) == 2 || throw(DimensionMismatch("hist2d requires an Nx2 matrix"))
-    n = length(edg1) - 1
-    m = length(edg2) - 1
-    size(H) == (n, m) || throw(DimensionMismatch("incorrect size of histogram"))
-    if init
-        fill!(H, zero(HT))
-    end
-    for i = 1:size(v,1)             # fixme (iter): update when #15459 is done
-        x = searchsortedfirst(edg1, v[i,1]) - 1
-        y = searchsortedfirst(edg2, v[i,2]) - 1
-        if 1 <= x <= n && 1 <= y <= m
-            @inbounds H[x,y] += 1
-        end
-    end
-    edg1, edg2, H
-end
-
-hist2d(v::AbstractMatrix, edg1::AbstractVector, edg2::AbstractVector) =
-    hist2d!(Array(Int, length(edg1)-1, length(edg2)-1), v, edg1, edg2)
-
-hist2d(v::AbstractMatrix, edg::AbstractVector) = hist2d(v, edg, edg)
-
-hist2d(v::AbstractMatrix, n1::Integer, n2::Integer) =
-    hist2d(v, histrange(sub(v,:,1),n1), histrange(sub(v,:,2),n2))
-hist2d(v::AbstractMatrix, n::Integer) = hist2d(v, n, n)
-hist2d(v::AbstractMatrix) = hist2d(v, sturges(size(v,1)))
+    quantile!(sorted ? v : copymutable(v), p; sorted=sorted)

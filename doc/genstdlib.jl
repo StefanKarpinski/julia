@@ -3,17 +3,17 @@ module GenStdLib
 import Base.Docs: Binding, DocStr
 
 # Constants.
-const DOCSTRING_DIRECTIVE = r"^(.. (function):: ).*"
+const DOCSTRING_DIRECTIVE = r"^(.. (function|type|variable):: ).*"
 
 # Types.
 
 typealias Signature Tuple{Binding, Type}
 
 type State
-    files      :: Dict{UTF8String, Vector{UTF8String}}
-    validdocs  :: Dict{UTF8String, Tuple{Module, Signature, DocStr}}
+    files      :: Dict{String, Vector{String}}
+    validdocs  :: Dict{String, Tuple{Module, Signature, DocStr}}
     baddocs    :: Dict{Signature, Tuple{Module, DocStr}}
-    documented :: Dict{Signature, Tuple{Module, DocStr, UTF8String}}
+    documented :: Dict{Signature, Tuple{Module, DocStr, String}}
     errorlevel :: Int
     debug      :: Bool
     State() = new(Dict(), Dict(), Dict(), Dict(), 0, "JULIA_GENSTDLIB_DEBUG" in keys(ENV))
@@ -111,7 +111,7 @@ function loaddocs!(state::State, mod, binding::Binding, typesig, docstr)
     markdown = Base.Docs.parsedoc(docstr)
     if validdocstr(markdown)
         code = rstrip(markdown.content[1].code)
-        if haskey(state.validdocs, code)
+        if haskey(state.validdocs, code) && state.validdocs[code][3] !== docstr
             code = indent(code)
             warn("duplicate signature found for '$binding' in module '$mod':\n\n$code\n")
             state.errorlevel = 2
@@ -156,7 +156,7 @@ function getdoc(state::State, file::AbstractString, input::Vector)
         # Push the rst text for the docstring into the output.
         mod, (binding, typesig), docstr = state.validdocs[signature]
         md  = Markdown.MD(Base.Docs.parsedoc(docstr).content[2:end])
-        rst = Base.Markdown.rst(md)
+        rst = Base.Markdown.rst(dropheaders(md))
         push!(output, "   .. Docstring generated from Julia source", "")
         for line in split(rst, '\n')
             line = isempty(line) ? "" : string(" "^3, line)
@@ -176,6 +176,11 @@ function getdoc(state::State, file::AbstractString, input::Vector)
     end
     return output
 end
+
+# Replace headers in docs with bold since Sphinx does not allow headers inside docstrings.
+dropheaders(md) = Markdown.MD(map(bold, md.content))
+bold(x::Markdown.Header) = Markdown.Paragraph(Markdown.Bold(x.text))
+bold(other) = other
 
 # Utilities.
 

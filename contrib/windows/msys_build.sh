@@ -19,12 +19,12 @@ checksum_download() {
   f=$1
   url=$2
   if [ -e "$f" ]; then
-    deps/jlchecksum "$f" 2> /dev/null && return
+    deps/tools/jlchecksum "$f" 2> /dev/null && return
     echo "Checksum for '$f' changed, download again." >&2
   fi
   echo "Downloading '$f'"
   $curlflags -O "$url"
-  deps/jlchecksum "$f"
+  deps/tools/jlchecksum "$f"
 }
 
 # If ARCH environment variable not set, choose based on uname -m
@@ -86,6 +86,8 @@ case $(uname) in
 esac
 
 # Download most recent Julia binary for dependencies
+# Fix directory not found error during decompression on msys2
+mkdir -p usr/Git/usr
 if ! [ -e julia-installer.exe ]; then
   f=julia-latest-win$bits.exe
   echo "Downloading $f"
@@ -94,11 +96,11 @@ if ! [ -e julia-installer.exe ]; then
   $SEVENZIP x -y $f >> get-deps.log
 fi
 for i in bin/*.dll Git/usr/bin/*.dll Git/usr/bin/*.exe; do
-  $SEVENZIP e -y julia-installer.exe "\$_OUTDIR/$i" \
+  $SEVENZIP e -y julia-installer.exe "$i" \
     -ousr\\`dirname $i | sed -e 's|/julia||' -e 's|/|\\\\|g'` >> get-deps.log
 done
 for i in share/julia/base/pcre_h.jl; do
-  $SEVENZIP e -y julia-installer.exe "\$_OUTDIR/$i" -obase >> get-deps.log
+  $SEVENZIP e -y julia-installer.exe "$i" -obase >> get-deps.log
 done
 echo "override PCRE_INCL_PATH =" >> Make.user
 # suppress "bash.exe: warning: could not find /tmp, please create!"
@@ -120,7 +122,7 @@ if [ -z "$USEMSVC" ]; then
   fi
   export AR=${CROSS_COMPILE}ar
 
-  f=llvm-3.7.1-$ARCH-w64-mingw32-juliadeps-r04.7z
+  f=llvm-3.7.1-$ARCH-w64-mingw32-juliadeps-r09.7z
 else
   echo "override USEMSVC = 1" >> Make.user
   echo "override ARCH = $ARCH" >> Make.user
@@ -140,8 +142,8 @@ checksum_download \
     "$f" "https://bintray.com/artifact/download/tkelman/generic/$f"
 echo "Extracting $f"
 $SEVENZIP x -y $f >> get-deps.log
-echo 'override LLVM_CONFIG := $(JULIAHOME)/usr/tools/llvm-config.exe' >> Make.user
-echo 'override LLVM_SIZE := $(JULIAHOME)/usr/tools/llvm-size.exe' >> Make.user
+echo 'override LLVM_CONFIG := $(JULIAHOME)/usr/bin/llvm-config.exe' >> Make.user
+echo 'override LLVM_SIZE := $(JULIAHOME)/usr/bin/llvm-size.exe' >> Make.user
 
 if [ -z "`which make 2>/dev/null`" ]; then
   if [ -n "`uname | grep CYGWIN`" ]; then

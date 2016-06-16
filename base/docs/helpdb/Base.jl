@@ -74,7 +74,7 @@ asin
 
 Subtype operator, equivalent to `issubtype(T1,T2)`.
 """
-Base.(:(<:))
+Base.:(<:)
 
 """
     schedule(t::Task, [val]; error=false)
@@ -144,7 +144,19 @@ download
     @everywhere
 
 Execute an expression on all processes. Errors on any of the processes are collected into a
-`CompositeException` and thrown.
+`CompositeException` and thrown. For example :
+
+    @everywhere bar=1
+
+will define `bar` under module `Main` on all processes.
+
+Unlike `@spawn` and `@spawnat`, `@everywhere` does not capture any local variables. Prefixing
+`@everywhere` with `@eval` allows us to broadcast local variables using interpolation :
+
+    foo = 1
+    @eval @everywhere bar=\$foo
+
+
 """
 :@everywhere
 
@@ -155,14 +167,6 @@ Return `string` with any leading whitespace removed. If `chars` (a character, or
 set of characters) is provided, instead remove characters contained in it.
 """
 lstrip
-
-"""
-    reenable_sigint(f::Function)
-
-Re-enable Ctrl-C handler during execution of a function. Temporarily reverses the effect of
-`disable_sigint`.
-"""
-reenable_sigint
 
 """
     indmin(itr) -> Integer
@@ -219,19 +223,11 @@ Bessel function of the first kind of order `nu`, ``J_\\nu(x)``.
 besselj
 
 """
-    @code_lowered
-
-Evaluates the arguments to the function call, determines their types, and calls
-[`code_lowered`](:func:`code_lowered`) on the resulting expression.
-"""
-:@code_lowered
-
-"""
     //(num, den)
 
 Divide two integers or rational numbers, giving a `Rational` result.
 """
-Base.(:(//))
+Base.:(//)
 
 """
     At_mul_B(A, B)
@@ -248,21 +244,6 @@ Returns the method table for `f`.
 If `types` is specified, returns an array of methods whose types match.
 """
 methods
-
-"""
-    pmap(f, lsts...; err_retry=true, err_stop=false, pids=workers())
-
-Transform collections `lsts` by applying `f` to each element in parallel. (Note that
-`f` must be made available to all worker processes; see [Code Availability and Loading Packages](:ref:`Code Availability and Loading Packages <man-parallel-computing-code-availability>`)
-for details.) If `nprocs() > 1`, the calling process will be dedicated to assigning tasks.
-All other available processes will be used as parallel workers, or on the processes
-specified by `pids`.
-
-If `err_retry` is `true`, it retries a failed application of `f` on a different worker. If
-`err_stop` is `true`, it takes precedence over the value of `err_retry` and `pmap` stops
-execution on the first error.
-"""
-pmap
 
 """
     workers()
@@ -290,7 +271,7 @@ sortrows
 
 Element-wise right division operator.
 """
-Base.(:(./))
+Base.:(./)
 
 """
     IPv6(host::Integer) -> IPv6
@@ -305,14 +286,6 @@ IPv6
 Multiply elements of `A` over the singleton dimensions of `r`, and write results to `r`.
 """
 prod!
-
-"""
-    hist2d!(counts, M, e1, e2) -> (e1, e2, counts)
-
-Compute a "2d histogram" with respect to the bins delimited by the edges given in `e1` and
-`e2`. This function writes the results to a pre-allocated array `counts`.
-"""
-hist2d!
 
 """
     airybi(x)
@@ -568,7 +541,7 @@ ind2sub(a, index)
 
 Element-wise multiplication operator.
 """
-Base.(:(.*))
+Base.:(.*)
 
 """
     ror!(dest::BitArray{1}, src::BitArray{1}, i::Integer) -> BitArray{1}
@@ -717,14 +690,6 @@ keyword arguments `addprocs` was called with.
 launch
 
 """
-    @code_typed
-
-Evaluates the arguments to the function call, determines their types, and calls
-[`code_typed`](:func:`code_typed`) on the resulting expression.
-"""
-:@code_typed
-
-"""
     invdigamma(x)
 
 Compute the inverse digamma function of `x`.
@@ -779,7 +744,7 @@ julia> [1:5;] |> x->x.^2 |> sum |> inv
 0.01818181818181818
 ```
 """
-Base.(:(|>))
+Base.:(|>)
 
 """
     assert(cond)
@@ -811,12 +776,12 @@ Equivalent to `stat(file).mode`
 filemode
 
 """
-    print_joined(io, items, delim, [last])
+    join(io, items, delim, [last])
 
 Print elements of `items` to `io` with `delim` between them. If `last` is specified, it is
 used as the final delimiter instead of `delim`.
 """
-print_joined
+join(io, items, delim, last)
 
 """
     lfact(x)
@@ -918,7 +883,7 @@ diag
 
 Element-wise exponentiation operator.
 """
-Base.(:(.^))
+Base.:(.^)
 
 """
     isspace(c::Union{Char,AbstractString}) -> Bool
@@ -1141,13 +1106,6 @@ results to `r`.
 any!
 
 """
-    falses(dims)
-
-Create a `BitArray` with all values set to `false`.
-"""
-falses
-
-"""
     filter!(function, collection)
 
 Update `collection`, removing elements for which `function` is `false`. For associative
@@ -1211,7 +1169,7 @@ sizeof(::AbstractString)
 
 See the [`is`](:func:`is`) operator.
 """
-Base.(:(===))
+Base.:(===)
 
 """
     ReadOnlyMemoryError()
@@ -1324,21 +1282,6 @@ The binary operator `≈` is equivalent to `isapprox` with the default arguments
 is equivalent to `!isapprox(x,y)`.
 """
 isapprox
-
-"""
-    primes([lo,] hi)
-
-Returns a collection of the prime numbers (from `lo`, if specified) up to `hi`.
-"""
-primes
-
-"""
-    primesmask([lo,] hi)
-
-Returns a prime sieve, as a `BitArray`, of the positive integers (from `lo`, if specified)
-up to `hi`. Useful when working with either primes or composite numbers.
-"""
-primesmask
 
 """
     sinh(x)
@@ -1474,7 +1417,8 @@ permutedims
 """
     shuffle!([rng,] v)
 
-In-place version of [`shuffle`](:func:`shuffle`).
+In-place version of [`shuffle`](:func:`shuffle`): randomly permute the array `v` in-place,
+optionally supplying the random-number generator `rng`.
 """
 shuffle!
 
@@ -1570,7 +1514,7 @@ expand
 [`gemm!`](:func:`Base.LinAlg.BLAS.gemm!`). By default, if no arguments are specified, it
 multiplies a matrix of size `n x n`, where `n = 2000`. If the underlying BLAS is using
 multiple threads, higher flop rates are realized. The number of BLAS threads can be set with
-`blas_set_num_threads(n)`.
+`BLAS.set_num_threads(n)`.
 
 If the keyword argument `parallel` is set to `true`, `peakflops` is run in parallel on all
 the worker processors. The flop rate of the entire parallel computer is returned. When
@@ -1603,9 +1547,7 @@ ind2chr
 """
     reshape(A, dims)
 
-Create an array with the same data as the given array, but with different dimensions. An
-implementation for a particular type of array may choose whether the data is copied or
-shared.
+Create an array with the same data as the given array, but with different dimensions.
 """
 reshape
 
@@ -1666,7 +1608,7 @@ searchsorted
 Right division operator: multiplication of `x` by the inverse of `y` on the right. Gives
 floating-point results for integer arguments.
 """
-Base.(:(/))
+Base.:(/)
 
 """
     connect([host],port) -> TCPSocket
@@ -1720,7 +1662,7 @@ split
 """
     dump(x)
 
-Show all user-visible structure of a value.
+Show every part of the representation of a value.
 """
 dump
 
@@ -1754,7 +1696,7 @@ Scaled Bessel function of the third kind of order `nu`, ``H^{(2)}_\\nu(x) e^{x i
 hankelh2x
 
 """
-    ndigits(n, b)
+    ndigits(n, b = 10)
 
 Compute the number of digits in number `n` written in base `b`.
 """
@@ -1886,23 +1828,23 @@ value for that key will be the value it has in the last collection listed.
 
 ```jldoctest
 julia> a = Dict("foo" => 0.0, "bar" => 42.0)
-Dict{ASCIIString,Float64} with 2 entries:
+Dict{String,Float64} with 2 entries:
   "bar" => 42.0
   "foo" => 0.0
 
-julia> b = Dict(utf8("baz") => 17, utf8("bar") => 4711)
-Dict{UTF8String,Int64} with 2 entries:
+julia> b = Dict("baz" => 17, "bar" => 4711)
+Dict{String,Int64} with 2 entries:
   "bar" => 4711
   "baz" => 17
 
 julia> merge(a, b)
-Dict{UTF8String,Float64} with 3 entries:
+Dict{String,Float64} with 3 entries:
   "bar" => 4711.0
   "baz" => 17.0
   "foo" => 0.0
 
 julia> merge(b, a)
-Dict{UTF8String,Float64} with 3 entries:
+Dict{String,Float64} with 3 entries:
   "bar" => 42.0
   "baz" => 17.0
   "foo" => 0.0
@@ -2084,36 +2026,6 @@ of a string.
 isdigit
 
 """
-    @windows
-
-Given `@windows? a : b`, do `a` on Windows and `b` elsewhere. See documentation in [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@windows
-
-"""
-    @unix
-
-Given `@unix? a : b`, do `a` on Unix systems (including Linux and OS X) and `b` elsewhere.
-See documentation in [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@unix
-
-"""
-    @windows_only
-
-A macro that evaluates the given expression only on Windows systems. See documentation in [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@windows_only
-
-"""
-    @unix_only
-
-A macro that evaluates the given expression only on Unix systems (including Linux and OS X). See
-documentation in [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@unix_only
-
-"""
     num2hex(f)
 
 Get a hexadecimal string of the binary representation of a floating point number.
@@ -2247,17 +2159,6 @@ specified using the same keywords as `sort!`.
 See also [`sortperm!`](:func:`sortperm!`).
 """
 sortperm
-
-"""
-    mod2pi(x)
-
-Modulus after division by 2pi, returning in the range \[0,2pi).
-
-This function computes a floating point representation of the modulus after division by
-numerically exact 2pi, and is therefore not exactly the same as mod(x,2pi), which would
-compute the modulus of `x` relative to division by the floating-point number 2pi.
-"""
-mod2pi
 
 """
     cumsum!(B, A, [dim])
@@ -2568,7 +2469,7 @@ reduce(op, itr)
 
 Element-wise greater-than-or-equals comparison operator.
 """
-Base.(:(.>=))
+Base.:(.>=)
 
 """
     stdm(v, m)
@@ -2685,7 +2586,7 @@ Example for a sparse 2-d array:
 
 ```jldoctest
 julia> A = sparse([1, 1, 2], [1, 3, 1], [1, 2, -5])
-2x3 sparse matrix with 3 Int64 entries:
+2×3 sparse matrix with 3 Int64 nonzero entries:
         [1, 1]  =  1
         [2, 1]  =  -5
         [1, 3]  =  2
@@ -2721,7 +2622,7 @@ eachindex
 
 Element-wise less-than comparison operator.
 """
-Base.(:(.<))
+Base.:(.<)
 
 """
     UndefRefError()
@@ -2779,9 +2680,9 @@ mapping the SharedArray
 indexpids
 
 """
-    remotecall_wait(func, id, args...)
+    remotecall_wait(func, id, args...; kwargs...)
 
-Perform `wait(remotecall(...))` in one message.
+Perform `wait(remotecall(...))` in one message. Keyword arguments, if any, are passed through to `func`.
 """
 remotecall_wait
 
@@ -2954,10 +2855,14 @@ Show an expression and result, returning the result.
 """
     showcompact(x)
 
+Show a compact representation of a value.
 
-Show a more compact representation of a value. This is used for printing array elements. If
-a new type has a different compact representation,
-it should test `Base.limit_output(io)` in its normal `show` method.
+This is used for printing array elements without repeating type information (which would
+be redundant with that printed once for the whole array), and without line breaks inside
+the representation of an element.
+
+To offer a compact representation different from its standard one, a custom type should
+test `get(io, :compact, false)` in its normal `show` method.
 """
 showcompact
 
@@ -2965,7 +2870,7 @@ showcompact
     isleaftype(T)
 
 Determine whether `T` is a concrete type that can have instances, meaning its only subtypes
-are itself and `None` (but `T` itself is not `None`).
+are itself and `Union{}` (but `T` itself is not `Union{}`).
 """
 isleaftype
 
@@ -2984,13 +2889,6 @@ Compute the complementary error function of `x`, defined by ``1 - \\operatorname
 erfc
 
 """
-    prevfloat(f) -> AbstractFloat
-
-Get the previous floating point number in lexicographic order.
-"""
-prevfloat
-
-"""
     rest(iter, state)
 
 An iterator that yields the same elements as `iter`, but starting at the given `state`.
@@ -3001,32 +2899,9 @@ rest
     getfield(value, name::Symbol)
 
 Extract a named field from a `value` of composite type. The syntax `a.b` calls
-`getfield(a, :b)`, and the syntax `a.(b)` calls `getfield(a, b)`.
+`getfield(a, :b)`.
 """
 getfield
-
-"""
-    utf8(::Array{UInt8,1})
-
-Create a UTF-8 string from a byte array.
-"""
-utf8(::Vector{UInt8})
-
-"""
-    utf8(::Ptr{UInt8}, [length])
-
-Create a UTF-8 string from the address of a C (0-terminated) string encoded in UTF-8. A copy
-is made; the ptr can be safely freed. If `length` is specified, the string does not have to
-be 0-terminated.
-"""
-utf8(::Ptr{UInt8}, length::Int = 1)
-
-"""
-    utf8(s)
-
-Convert a string to a contiguous UTF-8 string (all characters must be valid UTF-8 characters).
-"""
-utf8(s)
 
 """
     hvcat(rows::Tuple{Vararg{Int}}, values...)
@@ -3040,23 +2915,23 @@ julia> a, b, c, d, e, f = 1, 2, 3, 4, 5, 6
 (1,2,3,4,5,6)
 
 julia> [a b c; d e f]
-2x3 Array{Int64,2}:
+2×3 Array{Int64,2}:
  1  2  3
  4  5  6
 
 julia> hvcat((3,3), a,b,c,d,e,f)
-2x3 Array{Int64,2}:
+2×3 Array{Int64,2}:
  1  2  3
  4  5  6
 
 julia> [a b;c d; e f]
-3x2 Array{Int64,2}:
+3×2 Array{Int64,2}:
  1  2
  3  4
  5  6
 
 julia> hvcat((2,2,2), a,b,c,d,e,f)
-3x2 Array{Int64,2}:
+3×2 Array{Int64,2}:
  1  2
  3  4
  5  6
@@ -3211,7 +3086,7 @@ addprocs(n::Integer)
 """
     addprocs() -> List of process identifiers
 
-Equivalent to `addprocs(CPU_CORES)`
+Equivalent to `addprocs(Sys.CPU_CORES)`
 
 Note that workers do not run a `.juliarc.jl` startup script, nor do they synchronize their
 global state (such as global variables, new method definitions, and loaded modules) with any
@@ -3388,7 +3263,7 @@ Redirect I/O to or from the given `command`. Keyword arguments specify which of 
 command's streams should be redirected. `append` controls whether file output appends to the
 file. This is a more general version of the 2-argument `pipeline` function.
 `pipeline(from, to)` is equivalent to `pipeline(from, stdout=to)` when `from` is a command,
-and to `pipe(to, stdin=from)` when `from` is another kind of data source.
+and to `pipeline(to, stdin=from)` when `from` is another kind of data source.
 
 **Examples**:
 
@@ -3439,14 +3314,6 @@ The lowest value representable by the given (real) numeric DataType `T`.
 typemin
 
 """
-    call(x, args...)
-
-If `x` is not a `Function`, then `x(args...)` is equivalent to `call(x, args...)`. This
-means that function-like behavior can be added to any type by defining new `call` methods.
-"""
-call
-
-"""
     countfrom(start=1, step=1)
 
 An iterator that counts forever, starting at `start` and incrementing by `step`.
@@ -3493,13 +3360,6 @@ Returns the lower triangle of `M` starting from the `k`th superdiagonal.
 """
 tril(M,k)
 
-"""
-    @edit
-
-Evaluates the arguments to the function call, determines their types, and calls the `edit`
-function on the resulting expression.
-"""
-:@edit
 
 """
     subtypes(T::DataType)
@@ -3522,7 +3382,7 @@ digits
     bytes2hex(bin_arr::Array{UInt8, 1})
 
 Convert an array of bytes to its hexadecimal representation. All characters are in
-lower-case. Returns an `ASCIIString`.
+lower-case. Returns a `String`.
 """
 bytes2hex
 
@@ -3615,23 +3475,6 @@ not representable.
 trunc
 
 """
-    @less
-
-Evaluates the arguments to the function call, determines their types, and calls the `less`
-function on the resulting expression.
-"""
-:@less
-
-"""
-    broadcast_function(f)
-
-Returns a function `broadcast_f` such that
-`broadcast_function(f)(As...) === broadcast(f, As...)`. Most useful in the form
-`const broadcast_f = broadcast_function(f)`.
-"""
-broadcast_function
-
-"""
     unsafe_convert(T,x)
 
 Convert `x` to a value of type `T`
@@ -3690,7 +3533,7 @@ multiple of four, this is equivalent to a `copy`.
 rotr90(A, k)
 
 """
-    readdir([dir]) -> Vector{ByteString}
+    readdir([dir]) -> Vector{String}
 
 Returns the files and directories in the directory `dir` (or the current working directory if not given).
 """
@@ -3771,7 +3614,7 @@ second variant.
 popdisplay
 
 """
-    readdlm(source, delim::Char, T::Type, eol::Char; header=false, skipstart=0, skipblanks=true, use_mmap, ignore_invalid_chars=false, quotes=true, dims, comments=true, comment_char='#')
+    readdlm(source, delim::Char, T::Type, eol::Char; header=false, skipstart=0, skipblanks=true, use_mmap, quotes=true, dims, comments=true, comment_char='#')
 
 Read a matrix from the source where each line (separated by `eol`) gives one row, with
 elements separated by the given delimiter. The source can be a text file, stream or byte
@@ -3780,7 +3623,7 @@ mapped segment as source.
 
 If `T` is a numeric type, the result is an array of that type, with any non-numeric elements
 as `NaN` for floating-point types, or zero. Other useful values of `T` include
-`ASCIIString`, `AbstractString`, and `Any`.
+`String`, `AbstractString`, and `Any`.
 
 If `header` is `true`, the first row of data will be read as header and the tuple
 `(data_cells, header_cells)` is returned instead of only `data_cells`.
@@ -3796,7 +3639,7 @@ the file is large, and is only read once and not written to.
 If `ignore_invalid_chars` is `true`, bytes in `source` with invalid character encoding will
 be ignored. Otherwise an error is thrown indicating the offending character position.
 
-If `quotes` is `true`, column enclosed within double-quote (") characters are allowed to
+If `quotes` is `true`, column enclosed within double-quote (\") characters are allowed to
 contain new lines and column delimiters. Double-quote characters within a quoted field must
 be escaped with another double-quote.  Specifying `dims` as a tuple of the expected rows and
 columns (including header, if any) may speed up reading of large files.  If `comments` is
@@ -3809,7 +3652,7 @@ readdlm(source, delim, T, eol)
     readdlm(source, delim::Char, eol::Char; options...)
 
 If all data is numeric, the result will be a numeric array. If some elements cannot be
-parsed as numbers, a cell array of numbers and strings is returned.
+parsed as numbers, a heterogeneous array of numbers and strings is returned.
 """
 readdlm(source, delim::Char, eol::Char)
 
@@ -3824,8 +3667,8 @@ readdlm(source, delim::Char, T::Type)
     readdlm(source, delim::Char; options...)
 
 The end of line delimiter is taken as `n`. If all data is numeric, the result will be a
-numeric array. If some elements cannot be parsed as numbers, a cell array of numbers and
-strings is returned.
+numeric array. If some elements cannot be parsed as numbers, a heterogeneous array of
+numbers and strings is returned.
 """
 readdlm(source, delim::Char)
 
@@ -3842,7 +3685,8 @@ readdlm(source, T::Type)
 
 The columns are assumed to be separated by one or more whitespaces. The end of line
 delimiter is taken as `n`. If all data is numeric, the result will be a numeric array. If
-some elements cannot be parsed as numbers, a cell array of numbers and strings is returned.
+some elements cannot be parsed as numbers, a heterogeneous array of numbers and strings
+is returned.
 """
 readdlm(source)
 
@@ -4084,7 +3928,7 @@ colon
     Base64EncodePipe(ostream)
 
 Returns a new write-only I/O stream, which converts any bytes written to it into
-base64-encoded ASCII bytes written to `ostream`. Calling `close` on the `Base64Pipe` stream
+base64-encoded ASCII bytes written to `ostream`. Calling `close` on the `Base64EncodePipe` stream
 is necessary to complete the encoding (but does not close `ostream`).
 """
 Base64EncodePipe
@@ -4218,25 +4062,7 @@ rot180(A, k)
 
 Element-wise less-than-or-equals comparison operator.
 """
-Base.(:(.<=))
-
-"""
-    checkbounds(array, indexes...)
-
-Throw an error if the specified indexes are not in bounds for the given array. Subtypes of
-`AbstractArray` should specialize this method if they need to provide custom bounds checking
-behaviors.
-"""
-checkbounds(array, indexes...)
-
-"""
-    checkbounds(::Type{Bool}, dimlength::Integer, index)
-
-Return a `Bool` describing if the given index is within the bounds of the given dimension
-length. Custom types that would like to behave as indices for all arrays can extend this
-method in order to provide a specialized bounds checking implementation.
-"""
-checkbounds(::Type{Bool}, ::Integer, index)
+Base.:(.<=)
 
 """
     asec(x)
@@ -4359,16 +4185,6 @@ Return an iterator over all keys in a collection. `collect(keys(d))` returns an 
 keys
 
 """
-    repeat(A, inner = Int[], outer = Int[])
-
-Construct an array by repeating the entries of `A`. The i-th element of `inner` specifies
-the number of times that the individual entries of the i-th dimension of `A` should be
-repeated. The i-th element of `outer` specifies the number of times that a slice along the
-i-th dimension of `A` should be repeated.
-"""
-repeat
-
-"""
     ReentrantLock()
 
 Creates a reentrant lock. The same task can acquire the lock as many times as required. Each
@@ -4418,13 +4234,6 @@ Pick a random element or array of random elements from the set of values specifi
 rand
 
 """
-    bitpack(A::AbstractArray{T,N}) -> BitArray
-
-Converts a numeric array to a packed boolean array.
-"""
-bitpack
-
-"""
     base(base, n, [pad])
 
 Convert an integer to a string in the given base, optionally specifying a number of digits
@@ -4439,31 +4248,6 @@ base
 An indexing operation into an array, `a`, tried to access an out-of-bounds element, `i`.
 """
 BoundsError
-
-"""
-    disable_sigint(f::Function)
-
-Disable Ctrl-C handler during execution of a function, for calling external code that is not
-interrupt safe. Intended to be called using `do` block syntax as follows:
-
-    disable_sigint() do
-        # interrupt-unsafe code
-        ...
-    end
-"""
-disable_sigint
-
-"""
-    hist2d(M, e1, e2) -> (edge1, edge2, counts)
-
-Compute a "2d histogram" of a set of N points specified by N-by-2 matrix `M`. Arguments `e1`
-and `e2` are bins for each dimension, specified either as integer bin counts or vectors of
-bin edges. The result is a tuple of `edge1` (the bin edges used in the first dimension),
-`edge2` (the bin edges used in the second dimension), and `counts`, a histogram matrix of
-size `(length(edge1)-1, length(edge2)-1)`. Note: Julia does not ignore `NaN` values in the
-computation.
-"""
-hist2d
 
 """
     which(f, types)
@@ -4575,7 +4359,7 @@ bkfact!
 
 Exponentiation operator.
 """
-Base.(:(^))(x, y)
+Base.:(^)(x, y)
 
 """
     ^(s, n)
@@ -4587,7 +4371,7 @@ julia> "Test "^3
 "Test Test Test "
 ```
 """
-Base.(:(^))(s::AbstractString, n::Int)
+Base.:(^)(s::AbstractString, n::Int)
 
 """
     position(s)
@@ -4618,7 +4402,7 @@ Determines whether a path is absolute (begins at the root directory).
 isabspath
 
 """
-    hex2bytes(s::ASCIIString)
+    hex2bytes(s::AbstractString)
 
 Convert an arbitrarily long hexadecimal string to its binary representation. Returns an
 `Array{UInt8,1}`, i.e. an array of bytes.
@@ -4663,16 +4447,6 @@ Bitwise not.
 Bessel function of the third kind of order `nu`, ``H^{(1)}_\\nu(x)``.
 """
 hankelh1
-
-"""
-    hessfact(A)
-
-Compute the Hessenberg decomposition of `A` and return a `Hessenberg` object. If `F` is the
-factorization object, the unitary matrix can be accessed with `F[:Q]` and the Hessenberg
-matrix with `F[:H]`. When `Q` is extracted, the resulting type is the `HessenbergQ` object,
-and may be converted to a regular matrix with [`full`](:func:`full`).
-"""
-hessfact
 
 """
     gcdx(x,y)
@@ -5119,13 +4893,6 @@ The distance between `x` and the next larger representable floating-point value 
 eps(::AbstractFloat)
 
 """
-    rem1(x, y)
-
-(Deprecated.) Remainder after division, returning in the range `(0, y]`.
-"""
-rem1
-
-"""
     isalpha(c::Union{Char,AbstractString}) -> Bool
 
 Tests whether a character is alphabetic, or whether this is true for all elements of a
@@ -5192,12 +4959,12 @@ process as a worker using TCP/IP sockets for transport.
 init_worker
 
 """
-    print_escaped(io, str::AbstractString, esc::AbstractString)
+    escape_string(io, str::AbstractString, esc::AbstractString)
 
 General escaping of traditional C and Unicode escape sequences, plus any characters in esc
 are also escaped (with a backslash).
 """
-print_escaped
+escape_string(io, str, esc)
 
 """
     typejoin(T, S)
@@ -5333,7 +5100,7 @@ Compute sine of `x`, where `x` is in radians.
 sin
 
 """
-    Base.compilecache(module::ByteString)
+    Base.compilecache(module::String)
 
 Creates a precompiled cache file for module (see help for `require`) and all of its
 dependencies. This can be used to reduce package load times. Cache files are stored in
@@ -5382,7 +5149,7 @@ overwriting the existing value of `Y`. Note that `Y` must not be aliased with ei
 julia> A=[1.0 2.0; 3.0 4.0]; B=[1.0 1.0; 1.0 1.0]; Y = similar(B); A_mul_B!(Y, A, B);
 
 julia> Y
-2x2 Array{Float64,2}:
+2×2 Array{Float64,2}:
  3.0  3.0
  7.0  7.0
 ```
@@ -5423,7 +5190,7 @@ istaskdone
 
 Element-wise greater-than comparison operator.
 """
-Base.(:(.>))
+Base.:(.>)
 
 """
     search(string, chars, [start])
@@ -5442,10 +5209,10 @@ value is a range of indexes where the matching sequence is found, such that `s[s
 search
 
 """
-    remotecall_fetch(func, id, args...)
+    remotecall_fetch(func, id, args...; kwargs...)
 
-Perform `fetch(remotecall(...))` in one message. Any remote exceptions are captured in a
-`RemoteException` and thrown.
+Perform `fetch(remotecall(...))` in one message.  Keyword arguments, if any, are passed through to `func`.
+Any remote exceptions are captured in a `RemoteException` and thrown.
 """
 remotecall_fetch
 
@@ -5550,14 +5317,6 @@ Returns `string` with the first character converted to lowercase.
 lcfirst
 
 """
-    @code_native
-
-Evaluates the arguments to the function call, determines their types, and calls
-[`code_native`](:func:`code_native`) on the resulting expression.
-"""
-:@code_native
-
-"""
     flipbits!(B::BitArray{N}) -> BitArray{N}
 
 Performs a bitwise not operation on `B`. See [`~`](:ref:`~ operator <~>`).
@@ -5570,14 +5329,6 @@ flipbits!
 Returns the value of a symbolic link `path`.
 """
 readlink
-
-"""
-    @code_warntype
-
-Evaluates the arguments to the function call, determines their types, and calls
-[`code_warntype`](:func:`code_warntype`) on the resulting expression.
-"""
-:@code_warntype
 
 """
     deg2rad(x)
@@ -5742,15 +5493,15 @@ get
 
 Element-wise not-equals comparison operator.
 """
-Base.(:(.!=))
+Base.:(.!=)
 
 """
     lufact!(A) -> LU
 
 `lufact!` is the same as [`lufact`](:func:`lufact`), but saves space by overwriting the
-input `A`, instead of creating a copy.  For sparse `A` the `nzval` field is not overwritten
-but the index fields, `colptr` and `rowval` are decremented in place, converting from
-1-based indices to 0-based indices.
+input `A`, instead of creating a copy. An `InexactError` exception is thrown if the
+factorisation produces a number not representable by the element type of `A`, e.g. for
+integer types.
 """
 lufact!
 
@@ -5839,15 +5590,6 @@ the results need to be used judiciously. See [Manual](:ref:`man-code-warntype`) 
 information.
 """
 code_warntype
-
-"""
-```
-broadcast!_function(f)
-```
-
-Like `broadcast_function`, but for `broadcast!`.
-"""
-broadcast!_function
 
 """
     setrounding(T, mode)
@@ -6091,18 +5833,9 @@ order with arrays.
 symdiff
 
 """
-    histrange(v, n)
-
-Compute *nice* bin ranges for the edges of a histogram of `v`, using approximately `n` bins.
-The resulting step sizes will be 1, 2 or 5 multiplied by a power of 10. Note: Julia does not
-ignore `NaN` values in the computation.
-"""
-histrange
-
-"""
     eta(x)
 
-Dirichlet eta function ``\\eta(s) = \\sum^\\infty_{n=1}(-)^{n-1}/n^{s}``.
+Dirichlet eta function ``\\eta(s) = \\sum^\\infty_{n=1}(-1)^{n-1}/n^{s}``.
 """
 eta
 
@@ -6158,7 +5891,9 @@ wait
     shuffle([rng,] v)
 
 Return a randomly permuted copy of `v`. The optional `rng` argument specifies a random
-number generator, see [Random Numbers](:ref:`Random Numbers <random-numbers>`).
+number generator (see [Random Numbers](:ref:`Random Numbers <random-numbers>`)).
+To permute `v` in-place, see [`shuffle!`](:func:`shuffle!`).  To obtain randomly permuted
+indices, see [`randperm`](:func:`randperm`).
 """
 shuffle
 
@@ -6172,7 +5907,7 @@ are taken from 2-tuples `(key,value)` generated by the argument.
 
 ```jldoctest
 julia> Dict([("A", 1), ("B", 2)])
-Dict{ASCIIString,Int64} with 2 entries:
+Dict{String,Int64} with 2 entries:
   "B" => 2
   "A" => 1
 ```
@@ -6181,7 +5916,7 @@ Alternatively, a sequence of pair arguments may be passed.
 
 ```jldoctest
 julia> Dict("A"=>1, "B"=>2)
-Dict{ASCIIString,Int64} with 2 entries:
+Dict{String,Int64} with 2 entries:
   "B" => 2
   "A" => 1
 ```
@@ -6214,7 +5949,7 @@ besselk
 """
     readchomp(x)
 
-Read the entirety of `x` as a string but remove trailing newlines. Equivalent to `chomp(readstring(x))`.
+Read the entirety of `x` as a string and remove a single trailing newline. Equivalent to `chomp(readstring(x))`.
 """
 readchomp
 
@@ -6307,7 +6042,7 @@ isdiag
 
 Equivalent to `!is(x, y)`.
 """
-Base.(:(!==))
+Base.:(!==)
 
 """
     trailing_ones(x::Integer) -> Integer
@@ -6337,43 +6072,6 @@ A character is classified as numeric if it belongs to the Unicode general catego
 i.e. a character whose category code begins with 'N'.
 """
 isnumber
-
-"""
-    similar(array, [element_type=eltype(array)], [dims=size(array)])
-
-Create an uninitialized mutable array with the given element type and size, based upon the
-given source array. The second and third arguments are both optional, defaulting to the
-given array's `eltype` and `size`. The dimensions may be specified either as a single tuple
-argument or as a series of integer arguments.
-
-Custom AbstractArray subtypes may choose which specific array type is best-suited to return
-for the given element type and dimensionality. If they do not specialize this method, the
-default is an `Array(element_type, dims...)`.
-
-For example, `similar(1:10, 1, 4)` returns an uninitialized `Array{Int,2}` since ranges are
-neither mutable nor support 2 dimensions:
-
-    julia> similar(1:10, 1, 4)
-    1x4 Array{Int64,2}:
-     4419743872  4374413872  4419743888  0
-
-Conversely, `similar(trues(10,10), 2)` returns an uninitialized `BitVector` with two
-elements since `BitArray`s are both mutable and can support 1-dimensional arrays:
-
-    julia> similar(trues(10,10), 2)
-    2-element BitArray{1}:
-     false
-     false
-
-Since `BitArray`s can only store elements of type `Bool`, however, if you request a
-different element type it will create a regular `Array` instead:
-
-    julia> similar(falses(10), Float64, 2, 4)
-    2x4 Array{Float64,2}:
-     2.18425e-314  2.18425e-314  2.18425e-314  2.18425e-314
-     2.18425e-314  2.18425e-314  2.18425e-314  2.18425e-314
-"""
-similar
 
 """
     copy(x)
@@ -6484,20 +6182,6 @@ Returns the number of dimensions of `A`.
 ndims
 
 """
-    @osx
-
-Given `@osx? a : b`, do `a` on OS X and `b` elsewhere. See documentation in [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@osx
-
-"""
-    @osx_only
-
-A macro that evaluates the given expression only on OS X systems. See documentation in [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@osx_only
-
-"""
     ishermitian(A) -> Bool
 
 Test whether a matrix is Hermitian.
@@ -6510,13 +6194,6 @@ ishermitian
 Compute sine of `x`, where `x` is in degrees.
 """
 sind
-
-"""
-    iseltype(A,T)
-
-Tests whether `A` or its elements are of type `T`.
-"""
-iseltype
 
 """
     min(x, y, ...)
@@ -6628,8 +6305,9 @@ Scale an array `A` by a scalar `b` overwriting `A` in-place.
 
 If `A` is a matrix and `b` is a vector, then `scale!(A,b)` scales each column `i` of `A` by
 `b[i]` (similar to `A*Diagonal(b)`), while `scale!(b,A)` scales each row `i` of `A` by `b[i]`
-(similar to `Diagonal(b)*A`), again operating in-place on `A`.
-
+(similar to `Diagonal(b)*A`), again operating in-place on `A`. An `InexactError` exception is
+thrown if the scaling produces a number not representable by the element type of `A`,
+e.g. for integer types.
 """
 scale!
 
@@ -6811,7 +6489,7 @@ Collections should generally implement `==` by calling `==` recursively on all c
 New numeric types should implement this function for two arguments of the new type, and
 handle comparison to other types via promotion rules where possible.
 """
-Base.(:(==))
+Base.:(==)
 
 """
     mapreducedim(f, op, A, dims[, initial])
@@ -6843,28 +6521,32 @@ Return, but do not print, the time elapsed since the last [`tic`](:func:`tic`).
 toq
 
 """
-    writemime(stream, mime, x)
+    show(stream, mime, x)
 
-The `display` functions ultimately call `writemime` in order to write an object `x` as a
+The `display` functions ultimately call `show` in order to write an object `x` as a
 given `mime` type to a given I/O `stream` (usually a memory buffer), if possible. In order
 to provide a rich multimedia representation of a user-defined type `T`, it is only necessary
-to define a new `writemime` method for `T`, via: `writemime(stream, ::MIME"mime", x::T) = ...`,
+to define a new `show` method for `T`, via: `show(stream, ::MIME"mime", x::T) = ...`,
 where `mime` is a MIME-type string and the function body calls `write` (or similar) to write
 that representation of `x` to `stream`. (Note that the `MIME""` notation only supports
 literal strings; to construct `MIME` types in a more flexible manner use
-`MIME{symbol("")}`.)
+`MIME{Symbol("")}`.)
 
 For example, if you define a `MyImage` type and know how to write it to a PNG file, you
-could define a function `writemime(stream, ::MIME"image/png", x::MyImage) = ...` to allow
+could define a function `show(stream, ::MIME"image/png", x::MyImage) = ...` to allow
 your images to be displayed on any PNG-capable `Display` (such as IJulia). As usual, be sure
-to `import Base.writemime` in order to add new methods to the built-in Julia function
-`writemime`.
+to `import Base.show` in order to add new methods to the built-in Julia function
+`show`.
+
+The default MIME type is `MIME"text/plain"`. There is a fallback definition for `text/plain`
+output that calls `show` with 2 arguments. Therefore, this case should be handled by
+defining a 2-argument `show(stream::IO, x::MyType)` method.
 
 Technically, the `MIME"mime"` macro defines a singleton type for the given `mime` string,
 which allows us to exploit Julia's dispatch mechanisms in determining how to display objects
 of any given type.
 """
-writemime
+show(stream, mime, x)
 
 """
     mean!(r, v)
@@ -6884,32 +6566,7 @@ two strings. For example
 
 `strings` can be any iterable over elements `x` which are convertible to strings via `print(io::IOBuffer, x)`.
 """
-join
-
-"""
-    linreg(x, y) -> a, b
-
-Perform linear regression. Returns `a` and `b` such that `a + b*x` is the closest straight
-line to the given points `(x, y)`, i.e., such that the squared error between `y` and `a +
-b*x` is minimized.
-
-**Example**:
-
-    using PyPlot
-    x = [1.0:12.0;]
-    y = [5.5, 6.3, 7.6, 8.8, 10.9, 11.79, 13.48, 15.02, 17.77, 20.81, 22.0, 22.99]
-    a, b = linreg(x, y)          # Linear regression
-    plot(x, y, "o")              # Plot (x, y) points
-    plot(x, [a+b*i for i in x])  # Plot line determined by linear regression
-"""
-linreg(x,y)
-
-"""
-    linreg(x, y, w)
-
-Weighted least-squares linear regression.
-"""
-linreg(x,y,w)
+join(strings, delim, last)
 
 """
     polygamma(m, x)
@@ -6982,7 +6639,7 @@ less(f::AbstractString, ?)
 Show the definition of a function using the default pager, optionally specifying a tuple of
 types to indicate which method to see.
 """
-less(m::Method, ?)
+less(func, ?)
 
 """
     sqrtm(A)
@@ -7098,14 +6755,6 @@ of a string. Control characters are the non-printing characters of the Latin-1 s
 iscntrl
 
 """
-    hist!(counts, v, e) -> e, counts
-
-Compute the histogram of `v`, using a vector/range `e` as the edges for the bins. This
-function writes the resultant counts to a pre-allocated array `counts`.
-"""
-hist!
-
-"""
     minimum!(r, A)
 
 Compute the minimum value of `A` over the singleton dimensions of `r`, and write results to `r`.
@@ -7124,7 +6773,7 @@ diagm
 
 Element-wise subtraction operator.
 """
-Base.(:(.-))
+Base.:(.-)
 
 """
     imag(z)
@@ -7158,7 +6807,7 @@ arguments of the new type. Because of the behavior of floating-point NaN values,
 implements a partial order. Types with a canonical partial order should implement `<`, and
 types with a canonical total order should implement `isless`.
 """
-Base.(:(<))
+Base.:(<)
 
 """
     EnvHash() -> EnvHash
@@ -7353,11 +7002,11 @@ implemented.) Use [`vecnorm`](:func:`vecnorm`) to compute the Frobenius norm.
 norm
 
 """
-    print_unescaped(io, s::AbstractString)
+    unescape_string(io, s::AbstractString)
 
-General unescaping of traditional C and Unicode escape sequences. Reverse of [`print_escaped`](:func:`print_escaped`).
+General unescaping of traditional C and Unicode escape sequences. Reverse of [`escape_string`](:func:`escape_string`).
 """
-print_unescaped
+unescape_string(io, s)
 
 """
     digits!(array, n, [base])
@@ -7371,7 +7020,7 @@ digits!
 """
     MethodError(f, args)
 
-A method with the required type signature does not exist in the given generic function.
+A method with the required type signature does not exist in the given generic function. Alternatively, there is no unique most-specific method.
 """
 MethodError
 
@@ -7453,13 +7102,6 @@ lexicographically comparable types, and `lexless` will call `lexcmp` by default.
 lexcmp
 
 """
-    inf(f)
-
-Returns positive infinity of the floating point type `f` or of the same floating point type as `f`.
-"""
-inf
-
-"""
     isupper(c::Union{Char,AbstractString}) -> Bool
 
 Tests whether a character is an uppercase letter, or whether this is true for all elements
@@ -7469,22 +7111,13 @@ Letter: Uppercase, or Lt, Letter: Titlecase.
 isupper
 
 """
-    pointer_to_array(pointer, dims[, take_ownership::Bool])
-
-Wrap a native pointer as a Julia Array object. The pointer element type determines the array
-element type. `own` optionally specifies whether Julia should take ownership of the memory,
-calling `free` on the pointer when the array is no longer referenced.
-"""
-pointer_to_array
-
-"""
     show(x)
 
 Write an informative text representation of a value to the current output stream. New types
 should overload `show(io, x)` where the first argument is a stream. The representation used
 by `show` generally includes Julia-specific formatting and type information.
 """
-show
+show(x)
 
 """
     @allocated
@@ -7730,7 +7363,7 @@ rpad
     setfield!(value, name::Symbol, x)
 
 Assign `x` to a named field in `value` of composite type. The syntax `a.b = c` calls
-`setfield!(a, :b, c)`, and the syntax `a.(b) = c` calls `setfield!(a, b, c)`.
+`setfield!(a, :b, c)`.
 """
 setfield!
 
@@ -7766,7 +7399,7 @@ countlines
 
 Matrix multiplication.
 """
-Base.(:(*))(::AbstractMatrix, ::AbstractMatrix)
+Base.:(*)(::AbstractMatrix, ::AbstractMatrix)
 
 """
     \\(A, B)
@@ -7783,14 +7416,14 @@ When `A` is sparse, a similar polyalgorithm is used. For indefinite matrices, th
 factorization does not use pivoting during the numerical factorization and therefore the
 procedure can fail even for invertible matrices.
 """
-Base.(:(\))(A,B)
+Base.:(\)(A,B)
 
 """
     .\\(x, y)
 
 Element-wise left division operator.
 """
-Base.(:(.\))(x,y)
+Base.:(.\)(x,y)
 
 """
     \\(x, y)
@@ -7798,7 +7431,7 @@ Base.(:(.\))(x,y)
 Left division operator: multiplication of `y` by the inverse of `x` on the left. Gives
 floating-point results for integer arguments.
 """
-Base.(:(\))(x::Number,y::Number)
+Base.:(\)(x::Number,y::Number)
 
 
 """
@@ -7808,7 +7441,7 @@ Base.(:(\))(x::Number,y::Number)
 
 Multiplication operator. `x*y*z*...` calls this function with all arguments, i.e. `*(x, y, z, ...)`.
 """
-Base.(:(*))(x, y...)
+Base.:(*)(x, y...)
 
 """
 ```
@@ -7822,14 +7455,7 @@ julia> "Hello " * "world"
 "Hello world"
 ```
 """
-Base.(:(*))(s::AbstractString, t::AbstractString)
-
-"""
-    complement!(s)
-
-Mutates [`IntSet`](:obj:`IntSet`) `s` into its set-complement.
-"""
-complement!
+Base.:(*)(s::AbstractString, t::AbstractString)
 
 """
     slice(A, inds...)
@@ -7861,25 +7487,6 @@ Get the vector of processes that have mapped the shared array.
 procs(::SharedArray)
 
 """
-    mod(x, y)
-
-Modulus after flooring division, returning in the range \[0,`y`), if `y` is positive, or
-(`y`,0\] if `y` is negative.
-
-```julia
-x == fld(x,y)*y + mod(x,y)
-```
-"""
-mod
-
-"""
-    trues(dims)
-
-Create a `BitArray` with all values set to `true`.
-"""
-trues
-
-"""
     qr(A [,pivot=Val{false}][;thin=true]) -> Q, R, [p]
 
 Compute the (pivoted) QR factorization of `A` such that either `A = Q*R` or `A[:,p] = Q*R`.
@@ -7903,23 +7510,6 @@ Returns a `TextDisplay <: Display`, which can display any object as the text/pla
 the same as the way an object is printed in the Julia REPL.)
 """
 TextDisplay
-
-"""
-    factor(n) -> Dict
-
-Compute the prime factorization of an integer `n`. Returns a dictionary. The keys of the
-dictionary correspond to the factors, and hence are of the same type as `n`. The value
-associated with each key indicates the number of times the factor appears in the
-factorization.
-
-```jldoctest
-julia> factor(100) # == 2*2*5*5
-Dict{Int64,Int64} with 2 entries:
-  2 => 2
-  5 => 2
-```
-"""
-factor
 
 """
     ismatch(r::Regex, s::AbstractString) -> Bool
@@ -8033,32 +7623,6 @@ Matrix inverse.
 inv
 
 """
-    fld1(x, y)
-
-Flooring division, returning a value consistent with `mod1(x,y)`
-
-```julia
-x == fld(x,y)*y + mod(x,y)
-x == (fld1(x,y)-1)*y + mod1(x,y)
-```
-"""
-fld1
-
-"""
-    mod1(x, y)
-
-Modulus after flooring division, returning a value in the range `(0, y]`.
-"""
-mod1
-
-"""
-    fldmod1(x, y)
-
-Return `(fld1(x,y), mod1(x,y))`.
-"""
-fldmod1
-
-"""
     @assert cond [text]
 
 Throw an `AssertionError` if `cond` is `false`. Preferred syntax for writing assertions.
@@ -8104,7 +7668,11 @@ leading_ones
 """
     deserialize(stream)
 
-Read a value written by `serialize`.
+Read a value written by `serialize`. `deserialize` assumes the binary data read from
+`stream` is correct and has been serialized by a compatible implementation of `serialize`.
+It has been designed with simplicity and performance as a goal and does not validate
+the data read. Malformed data can result in process termination. The caller has to ensure
+the integrity and correctness of data read from `stream`.
 """
 deserialize
 
@@ -8147,27 +7715,6 @@ Cumulative product of `A` along a dimension, storing the result in `B`. The dime
 cumprod!
 
 """
-    @linux
-
-Given `@linux? a : b`, do `a` on Linux and `b` elsewhere. See documentation [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@linux
-
-"""
-    @linux_only
-
-A macro that evaluates the given expression only on Linux systems. See documentation in [Handling Operating System Variation](:ref:`Handling Operating System Variation <man-handling-operating-system-variation>`).
-"""
-:@linux_only
-
-"""
-    complement(s)
-
-Returns the set-complement of [`IntSet`](:obj:`IntSet`) `s`.
-"""
-complement
-
-"""
     rethrow([e])
 
 Throw an object without changing the current exception backtrace. The default argument is
@@ -8179,10 +7726,10 @@ rethrow
     reprmime(mime, x)
 
 Returns an `AbstractString` or `Vector{UInt8}` containing the representation of `x` in the
-requested `mime` type, as written by `writemime` (throwing a `MethodError` if no appropriate
-`writemime` is available). An `AbstractString` is returned for MIME types with textual
+requested `mime` type, as written by `show` (throwing a `MethodError` if no appropriate
+`show` is available). An `AbstractString` is returned for MIME types with textual
 representations (such as `"text/html"` or `"application/postscript"`), whereas binary data
-is returned as `Vector{UInt8}`. (The function `istext(mime)` returns whether or not Julia
+is returned as `Vector{UInt8}`. (The function `istextmime(mime)` returns whether or not Julia
 treats a given `mime` type as text.)
 
 As a special case, if `x` is an `AbstractString` (for textual MIME types) or a
@@ -8251,28 +7798,11 @@ all elements of the string.
 ispunct
 
 """
-    bitunpack(B::BitArray{N}) -> Array{Bool,N}
-
-Converts a packed boolean array to an array of booleans.
-"""
-bitunpack
-
-"""
-    @which
-
-Applied to a function call, it evaluates the arguments to the specified function call, and
-returns the `Method` object for the method that would be called for those arguments. Applied
-to a variable, it returns the module in which the variable was bound. It calls out to the
-`which` function.
-"""
-:@which
-
-"""
     size(A, [dim...])
 
 Returns a tuple containing the dimensions of `A`. Optionally you can specify the
 dimension(s) you want the length of, and get the length of that dimension, or a tuple of the
-lengths of dimensions you asked for.:
+lengths of dimensions you asked for.
 
     julia> A = rand(2,3,4);
 
@@ -8332,7 +7862,7 @@ airy
 
 Boolean not.
 """
-Base.(:(!))
+Base.:(!)
 
 """
     length(A) -> Integer
@@ -8425,7 +7955,7 @@ NullException
 
 Element-wise equality comparison operator.
 """
-Base.(:(.==))
+Base.:(.==)
 
 """
     cfunction(function::Function, ReturnType::Type, (ArgumentTypes...))
@@ -8455,21 +7985,6 @@ address will be either IPv4 or IPv6 as appropriate.
 recvfrom
 
 """
-    @code_llvm
-
-Evaluates the arguments to the function call, determines their types, and calls
-[`code_llvm`](:func:`code_llvm`) on the resulting expression.
-"""
-:@code_llvm
-
-"""
-    nextfloat(f)
-
-Get the next floating point number in lexicographic order.
-"""
-nextfloat
-
-"""
     intersect(s1,s2...)
     ∩(s1,s2)
 
@@ -8485,7 +8000,7 @@ intersect
 Not-equals comparison operator. Always gives the opposite answer as `==`. New types should
 generally not implement this, and rely on the fallback definition `!=(x,y) = !(x==y)` instead.
 """
-Base.(:(!=))
+Base.:(!=)
 
 """
     @spawn
@@ -8605,7 +8120,7 @@ showall
 
 Returns a boolean value indicating whether or not the object `x` can be written as the given
 `mime` type. (By default, this is determined automatically by the existence of the
-corresponding `writemime` function for `typeof(x)`.)
+corresponding `show` function for `typeof(x)`.)
 """
 mimewritable
 
@@ -8619,38 +8134,12 @@ any element type for which `dot` is defined), compute the Euclidean dot product 
 vecdot
 
 """
-    isprime(x::Integer) -> Bool
-
-Returns `true` if `x` is prime, and `false` otherwise.
-
-```jldoctest
-julia> isprime(3)
-true
-```
-"""
-isprime(::Integer)
-
-"""
-    isprime(x::BigInt, [reps = 25]) -> Bool
-
-Probabilistic primality test. Returns `true` if `x` is prime; and `false` if `x` is not
-prime with high probability. The false positive rate is about `0.25^reps`. `reps = 25` is
-considered safe for cryptographic applications (Knuth, Seminumerical Algorithms).
-
-```jldoctest
-julia> isprime(big(3))
-true
-```
-"""
-isprime(::BigInt, ?)
-
-"""
     >(x, y)
 
 Greater-than comparison operator. Generally, new types should implement `<` instead of this
 function, and rely on the fallback definition `>(x,y) = y<x`.
 """
-Base.(:(>))
+Base.:(>)
 
 """
     match(r::Regex, s::AbstractString[, idx::Integer[, addopts]])
@@ -8681,6 +8170,8 @@ Ac_mul_B
 
 `qrfact!` is the same as [`qrfact`](:func:`qrfact`) when `A` is a subtype of
 `StridedMatrix`, but saves space by overwriting the input `A`, instead of creating a copy.
+An `InexactError` exception is thrown if the factorisation produces a number not
+representable by the element type of `A`, e.g. for integer types.
 """
 qrfact!
 
@@ -8745,9 +8236,10 @@ result is a `Vector{UInt8,1}`.
 readavailable
 
 """
-    remotecall(func, id, args...)
+    remotecall(func, id, args...; kwargs...)
 
 Call a function asynchronously on the given arguments on the specified process. Returns a `Future`.
+Keyword arguments, if any, are passed through to `func`.
 """
 remotecall
 
@@ -8772,7 +8264,7 @@ isa
 
 Less-than-or-equals comparison operator.
 """
-Base.(:(<=))
+Base.:(<=)
 
 """
     ProcessExitedException()
@@ -8830,8 +8322,8 @@ cos
     base64encode(args...)
 
 Given a `write`-like function `writefunc`, which takes an I/O stream as its first argument,
-`base64(writefunc, args...)` calls `writefunc` to write `args...` to a base64-encoded
-string, and returns the string. `base64(args...)` is equivalent to `base64(write, args...)`:
+`base64encode(writefunc, args...)` calls `writefunc` to write `args...` to a base64-encoded
+string, and returns the string. `base64encode(args...)` is equivalent to `base64encode(write, args...)`:
 it converts its arguments into bytes using the standard `write` functions and returns the
 base64-encoded string.
 """
@@ -8858,27 +8350,12 @@ alias the input `x` to modify it in-place.
 filt!
 
 """
-    ascii(::Array{UInt8,1})
+    ascii(s::AbstractString)
 
-Create an ASCII string from a byte array.
-"""
-ascii(::Vector{UInt8})
-
-"""
-    ascii(s)
-
-Convert a string to a contiguous ASCII string (all characters must be valid ASCII characters).
+Convert a string to `String` type and check that it contains only ASCII data, otherwise
+throwing an `ArugmentError` indicating the position of the first non-ASCII byte.
 """
 ascii(s)
-
-"""
-    ascii(::Ptr{UInt8}, [length])
-
-Create an ASCII string from the address of a C (0-terminated) string encoded in ASCII. A
-copy is made; the ptr can be safely freed. If `length` is specified, the string does not
-have to be 0-terminated.
-"""
-ascii(::Ptr{UInt8},?)
 
 """
     maxabs(itr)
@@ -8965,13 +8442,6 @@ true
 applicable
 
 """
-    xdump(x)
-
-Show all structure of a value, including all fields of objects.
-"""
-xdump
-
-"""
     Base.process_messages(instrm::AsyncStream, outstrm::AsyncStream)
 
 Called by cluster managers using custom transports. It should be called when the custom
@@ -9025,10 +8495,9 @@ A_ldiv_Bc
 """
     escape_string(str::AbstractString) -> AbstractString
 
-General escaping of traditional C and Unicode escape sequences. See
-[`print_escaped`](:func:`print_escaped`) for more general escaping.
+General escaping of traditional C and Unicode escape sequences.
 """
-escape_string
+escape_string(str)
 
 """
     significand(x)
@@ -9468,7 +8937,7 @@ isxdigit
 """
     fill(x, dims)
 
-Create an array filled with the value `x`. For example, `fill(1.0, (10,10))` returns a 10x10
+Create an array filled with the value `x`. For example, `fill(1.0, (10,10))` returns a 10×10
 array of floats, with each element initialized to `1.0`.
 
 If `x` is an object reference, all elements will refer to the same object. `fill(Foo(),
@@ -9534,9 +9003,9 @@ map!(f,destination,collection...)
     unescape_string(s::AbstractString) -> AbstractString
 
 General unescaping of traditional C and Unicode escape sequences. Reverse of
-[`escape_string`](:func:`escape_string`). See also [`print_unescaped`](:func:`print_unescaped`).
+[`escape_string`](:func:`escape_string`). See also [`unescape_string`](:func:`unescape_string`).
 """
-unescape_string
+unescape_string(s)
 
 """
     redirect_stdout()
@@ -9659,11 +9128,11 @@ Create an array of all zeros with the same element type and shape as `A`.
 zeros(A)
 
 """
-    symbol(x...) -> Symbol
+    Symbol(x...) -> Symbol
 
 Create a `Symbol` by concatenating the string representations of the arguments together.
 """
-symbol
+Symbol
 
 """
     zeta(s)
@@ -9671,14 +9140,6 @@ symbol
 Riemann zeta function ``\\zeta(s)``.
 """
 zeta(s)
-
-"""
-    zeta(s, z)
-
-Hurwitz zeta function ``\\zeta(s, z)``.  (This is equivalent to the Riemann zeta function
-``\\zeta(s)`` for the case of `z=1`.)
-"""
-zeta(s,z)
 
 """
     A_mul_Bt(A, B)
@@ -9702,7 +9163,7 @@ vecnorm
     isvalid(value) -> Bool
 
 Returns `true` if the given value is valid for its type, which currently can be one of
-`Char`, `ASCIIString`, `UTF8String`, `UTF16String`, or `UTF32String`.
+`Char`, `String`, `UTF16String`, or `UTF32String`.
 """
 isvalid(value)
 
@@ -9710,8 +9171,8 @@ isvalid(value)
     isvalid(T, value) -> Bool
 
 Returns `true` if the given value is valid for that type. Types currently can be `Char`,
-`ASCIIString`, `UTF8String`, `UTF16String`, or `UTF32String` Values for `Char` can be of
-type `Char` or `UInt32` Values for `ASCIIString` and `UTF8String` can be of that type, or
+`String`, `UTF16String`, or `UTF32String` Values for `Char` can be of
+type `Char` or `UInt32` Values for `String` can be of that type, or
 `Vector{UInt8}` Values for `UTF16String` can be `UTF16String` or `Vector{UInt16}` Values for
 `UTF32String` can be `UTF32String`, `Vector{Char}` or `Vector{UInt32}`
 """
@@ -9790,7 +9251,7 @@ Matrix trace.
 trace
 
 """
-    runtests([tests=["all"] [, numcores=iceil(CPU_CORES/2) ]])
+    runtests([tests=["all"] [, numcores=ceil(Integer, Sys.CPU_CORES / 2) ]])
 
 Run the Julia unit tests listed in `tests`, which can be either a string or an array of
 strings, using `numcores` processors. (not exported)
@@ -9874,22 +9335,6 @@ modified by the current file creation mask.
 """
 mkdir
 
-"""
-    bytestring(::Ptr{UInt8}, [length])
-
-Create a string from the address of a C (0-terminated) string encoded in ASCII or UTF-8. A
-copy is made; the ptr can be safely freed. If `length` is specified, the string does not
-have to be 0-terminated.
-"""
-bytestring(::Ptr{UInt8},?)
-
-"""
-    bytestring(s)
-
-Convert a string to a contiguous byte array representation appropriate for passing it to C
-functions. The string will be encoded as either ASCII or UTF-8.
-"""
-bytestring(s)
 
 """
     midpoints(e)
@@ -9904,7 +9349,7 @@ midpoints
 
 Element-wise addition operator.
 """
-Base.(:(.+))
+Base.:(.+)
 
 """
     reverseind(v, i)
@@ -9914,13 +9359,6 @@ Given an index `i` in `reverse(v)`, return the corresponding index in `v` so tha
 Unicode string.)
 """
 reverseind
-
-"""
-    nan(f)
-
-Returns NaN (not-a-number) of the floating point type `f` or of the same floating point type as `f`
-"""
-nan
 
 """
     float(x)
@@ -10010,24 +9448,6 @@ transformation is performed internally to map the infinite interval to a finite 
 quadgk
 
 """
-    hist(v[, n]) -> e, counts
-
-Compute the histogram of `v`, optionally using approximately `n` bins. The return values are
-a range `e`, which correspond to the edges of the bins, and `counts` containing the number
-of elements of `v` in each bin. Note: Julia does not ignore `NaN` values in the computation.
-"""
-hist(v,n::Int=?)
-
-"""
-    hist(v, e) -> e, counts
-
-Compute the histogram of `v` using a vector/range `e` as the edges for the bins. The result
-will be a vector of length `length(e) - 1`, such that the element at location `i` satisfies
-`sum(e[i] .< v .<= e[i+1])`. Note: Julia does not ignore `NaN` values in the computation.
-"""
-hist(v,e)
-
-"""
     islower(c::Union{Char,AbstractString}) -> Bool
 
 Tests whether a character is a lowercase letter, or whether this is true for all elements of
@@ -10035,14 +9455,6 @@ a string. A character is classified as lowercase if it belongs to Unicode catego
 Letter: Lowercase.
 """
 islower
-
-"""
-    cell(dims)
-
-Construct an uninitialized cell array (heterogeneous array). `dims` can be either a tuple or
-a series of integer arguments.
-"""
-cell
 
 """
     read(stream::IO, nb=typemax(Int); all=true)
@@ -10065,7 +9477,7 @@ on the `permute` and `scale` keyword arguments. The eigenvectors are returned co
 ```jldoctest
 julia> eig([1.0 0.0 0.0; 0.0 3.0 0.0; 0.0 0.0 18.0])
 ([1.0,3.0,18.0],
-3x3 Array{Float64,2}:
+3×3 Array{Float64,2}:
  1.0  0.0  0.0
  0.0  1.0  0.0
  0.0  0.0  1.0)
@@ -10160,11 +9572,11 @@ processes completed successfully.
 exit
 
 """
-    istext(m::MIME)
+    istextmime(m::MIME)
 
 Determine whether a MIME type is text data.
 """
-istext
+istextmime
 
 """
     merge!(collection, others...)
@@ -10357,7 +9769,7 @@ iswritable
 
 Bitwise or.
 """
-Base.(:(|))
+Base.:(|)
 
 """
     yieldto(task, arg = nothing)
@@ -10434,7 +9846,9 @@ filter
     randperm([rng,] n)
 
 Construct a random permutation of length `n`. The optional `rng` argument specifies a random
-number generator, see [Random Numbers](:ref:`Random Numbers <random-numbers>`).
+number generator (see [Random Numbers](:ref:`Random Numbers <random-numbers>`)).
+To randomly permute a arbitrary vector, see [`shuffle`](:func:`shuffle`)
+or [`shuffle!`](:func:`shuffle!`).
 """
 randperm
 
@@ -10519,7 +9933,7 @@ unsafe_pointer_to_objref
 """
     chomp(string)
 
-Remove a trailing newline from a string.
+Remove a single trailing newline from a string.
 """
 chomp
 
@@ -10550,7 +9964,7 @@ enumerate
 
 Greater-than-or-equals comparison operator.
 """
-Base.(:(>=))
+Base.:(>=)
 
 """
     dawson(x)
@@ -10594,7 +10008,7 @@ colon(start, step, stop)
 
 Bitwise exclusive or.
 """
-Base.(:$)(x, y)
+Base.:$(x, y)
 
 """
     getsockname(sock::Union{TCPServer, TCPSocket}) -> (IPAddr,UInt16)
@@ -10628,3 +10042,10 @@ to. This is useful when writing custom `serialize` methods for a type, which opt
 data written out depending on the receiving process id.
 """
 Base.worker_id_from_socket
+
+"""
+    Base.cluster_cookie([cookie]) -> cookie
+
+Returns the cluster cookie. If a cookie is passed, also sets it as the cluster cookie.
+"""
+Base.cluster_cookie

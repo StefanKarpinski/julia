@@ -30,7 +30,7 @@ function endswith(a::AbstractString, b::AbstractString)
 end
 endswith(str::AbstractString, chars::Chars) = !isempty(str) && last(str) in chars
 
-startswith(a::ByteString, b::ByteString) = startswith(a.data, b.data)
+startswith(a::String, b::String) = startswith(a.data, b.data)
 startswith(a::Vector{UInt8}, b::Vector{UInt8}) =
     (length(a) >= length(b) && ccall(:memcmp, Int32, (Ptr{UInt8}, Ptr{UInt8}, UInt), a, b, length(b)) == 0)
 
@@ -45,12 +45,12 @@ function chomp(s::AbstractString)
     if (j < 1 || s[j] != '\r') return s[1:i-1] end
     return s[1:j-1]
 end
-chomp(s::ByteString) =
+chomp(s::String) =
     (endof(s) < 1 || s.data[end]   != 0x0a) ? s :
     (endof(s) < 2 || s.data[end-1] != 0x0d) ? s[1:end-1] : s[1:end-2]
 
 # NOTE: use with caution -- breaks the immutable string convention!
-function chomp!(s::ByteString)
+function chomp!(s::String)
     if !isempty(s) && s.data[end] == 0x0a
         n = (endof(s) < 2 || s.data[end-1] != 0x0d) ? 1 : 2
         ccall(:jl_array_del_end, Void, (Any, UInt), s.data, n)
@@ -96,12 +96,12 @@ function lpad(s::AbstractString, n::Integer, p::AbstractString=" ")
     if m <= 0; return s; end
     l = strwidth(p)
     if l==1
-        return bytestring(p^m * s)
+        return string(p^m, s)
     end
     q = div(m,l)
     r = m - q*l
     i = r != 0 ? chr2ind(p, r) : -1
-    bytestring(p^q*p[1:i]*s)
+    string(p^q, p[1:i], s)
 end
 
 function rpad(s::AbstractString, n::Integer, p::AbstractString=" ")
@@ -109,12 +109,12 @@ function rpad(s::AbstractString, n::Integer, p::AbstractString=" ")
     if m <= 0; return s; end
     l = strwidth(p)
     if l==1
-        return bytestring(s * p^m)
+        return string(s, p^m)
     end
     q = div(m,l)
     r = m - q*l
     i = r != 0 ? chr2ind(p, r) : -1
-    bytestring(s*p^q*p[1:i])
+    string(s, p^q, p[1:i])
 end
 
 lpad(s, n::Integer, p=" ") = lpad(string(s),n,string(p))
@@ -177,7 +177,7 @@ _replace(io, repl, str, r, pattern) = print(io, repl)
 _replace(io, repl::Function, str, r, pattern) =
     print(io, repl(SubString(str, first(r), last(r))))
 
-function replace(str::ByteString, pattern, repl, limit::Integer)
+function replace(str::String, pattern, repl, limit::Integer)
     n = 1
     e = endof(str)
     i = a = start(str)
@@ -207,7 +207,7 @@ function replace(str::ByteString, pattern, repl, limit::Integer)
     write(out, SubString(str,i))
     takebuf_string(out)
 end
-replace(s::AbstractString, pat, f, n::Integer) = replace(bytestring(s), pat, f, n)
+replace(s::AbstractString, pat, f, n::Integer) = replace(String(s), pat, f, n)
 replace(s::AbstractString, pat, r) = replace(s, pat, r, 0)
 
 # hex <-> bytes conversion
@@ -241,5 +241,15 @@ function bytes2hex(a::AbstractArray{UInt8})
         b[i += 1] = hex_chars[1 + x >> 4]
         b[i += 1] = hex_chars[1 + x & 0xf]
     end
-    return ASCIIString(b)
+    return String(b)
 end
+
+# check for pure ASCII-ness
+
+function ascii(s::String)
+    for (i, b) in enumerate(s.data)
+        b < 0x80 || throw(ArgumentError("invalid ASCII at index $i in $(repr(s))"))
+    end
+    return s
+end
+ascii(x::AbstractString) = ascii(convert(String, x))

@@ -10,6 +10,7 @@ module CompletionFoo
         xx :: Test_y
     end
     type_test = Test_x(Test_y(1))
+    (::Test_y)() = "", ""
     module CompletionFoo2
 
     end
@@ -39,11 +40,15 @@ module CompletionFoo
     test5(x::Array{Bool,1}) = pass
     test5(x::BitArray{1}) = pass
     test5(x::Float64) = pass
+    const a=x->x
+    test6()=[a, a]
 
     array = [1, 1]
     varfloat = 0.1
 
     const tuple = (1, 2)
+
+    test_y_array=[CompletionFoo.Test_y(rand()) for i in 1:10]
 end
 
 function temp_pkg_dir(fn::Function)
@@ -109,6 +114,10 @@ c,r = test_complete(s)
 @test s[r] == "x"
 
 s = "Main.CompletionFoo.bar.no_val_available"
+c,r = test_complete(s)
+@test length(c)==0
+#cannot do dot completion on infix operator
+s = "+."
 c,r = test_complete(s)
 @test length(c)==0
 
@@ -192,7 +201,14 @@ c,r,res = test_complete(s)
 s = "max("
 c, r, res = test_complete(s)
 @test !res
-@test c[1] == string(start(methods(max)))
+@test let found = false
+    for m in methods(max)
+        if !found
+            found = (c[1] == string(m))
+        end
+    end
+    found
+end
 @test r == 1:3
 @test s[r] == "max"
 
@@ -200,7 +216,7 @@ c, r, res = test_complete(s)
 s = "CompletionFoo.test(1,1, "
 c, r, res = test_complete(s)
 @test !res
-@test c[1] == string(methods(CompletionFoo.test, Tuple{Int, Int})[1])
+@test c[1] == string(first(methods(CompletionFoo.test, Tuple{Int, Int})))
 @test length(c) == 3
 @test r == 1:18
 @test s[r] == "CompletionFoo.test"
@@ -208,7 +224,7 @@ c, r, res = test_complete(s)
 s = "CompletionFoo.test(CompletionFoo.array,"
 c, r, res = test_complete(s)
 @test !res
-@test c[1] == string(methods(CompletionFoo.test, Tuple{Array{Int, 1}, Any})[1])
+@test c[1] == string(first(methods(CompletionFoo.test, Tuple{Array{Int, 1}, Any})))
 @test length(c) == 2
 @test r == 1:18
 @test s[r] == "CompletionFoo.test"
@@ -216,7 +232,7 @@ c, r, res = test_complete(s)
 s = "CompletionFoo.test(1,1,1,"
 c, r, res = test_complete(s)
 @test !res
-@test c[1] == string(methods(CompletionFoo.test, Tuple{Any, Any, Any})[1])
+@test c[1] == string(first(methods(CompletionFoo.test, Tuple{Any, Any, Any})))
 @test r == 1:18
 @test s[r] == "CompletionFoo.test"
 
@@ -236,34 +252,34 @@ c, r, res = test_complete(s)
 
 s = "prevind(\"θ\",1,"
 c, r, res = test_complete(s)
-@test c[1] == string(methods(prevind, Tuple{UTF8String, Int})[1])
+@test c[1] == string(first(methods(prevind, Tuple{String, Int})))
 @test r == 1:7
 @test s[r] == "prevind"
 
-for (T, arg) in [(ASCIIString,"\")\""),(Char, "')'")]
+for (T, arg) in [(String,"\")\""),(Char, "')'")]
     s = "(1, CompletionFoo.test2($arg,"
     c, r, res = test_complete(s)
     @test length(c) == 1
-    @test c[1] == string(methods(CompletionFoo.test2, Tuple{T,})[1])
+    @test c[1] == string(first(methods(CompletionFoo.test2, Tuple{T,})))
     @test r == 5:23
     @test s[r] == "CompletionFoo.test2"
 end
 
 s = "(1, CompletionFoo.test2(`)`,"
 c, r, res = test_complete(s)
-@test c[1] == string(methods(CompletionFoo.test2, Tuple{Cmd})[1])
+@test c[1] == string(first(methods(CompletionFoo.test2, Tuple{Cmd})))
 @test length(c) == 1
 
 s = "CompletionFoo.test3([1, 2] + CompletionFoo.varfloat,"
 c, r, res = test_complete(s)
 @test !res
-@test c[1] == string(methods(CompletionFoo.test3, Tuple{Array{Float64, 1}, Float64})[1])
+@test c[1] == string(first(methods(CompletionFoo.test3, Tuple{Array{Float64, 1}, Float64})))
 @test length(c) == 1
 
 s = "CompletionFoo.test3([1.,2.], 1.,"
 c, r, res = test_complete(s)
 @test !res
-@test c[1] == string(methods(CompletionFoo.test3, Tuple{Array{Float64, 1}, Float64})[1])
+@test c[1] == string(first(methods(CompletionFoo.test3, Tuple{Array{Float64, 1}, Float64})))
 @test r == 1:19
 @test length(c) == 1
 @test s[r] == "CompletionFoo.test3"
@@ -271,7 +287,7 @@ c, r, res = test_complete(s)
 s = "CompletionFoo.test4(\"e\",r\" \","
 c, r, res = test_complete(s)
 @test !res
-@test c[1] == string(methods(CompletionFoo.test4, Tuple{ASCIIString, Regex})[1])
+@test c[1] == string(first(methods(CompletionFoo.test4, Tuple{String, Regex})))
 @test r == 1:19
 @test length(c) == 1
 @test s[r] == "CompletionFoo.test4"
@@ -280,7 +296,19 @@ s = "CompletionFoo.test5(push!(Base.split(\"\",' '),\"\",\"\").==\"\","
 c, r, res = test_complete(s)
 @test !res
 @test length(c) == 1
-@test c[1] == string(methods(CompletionFoo.test5, Tuple{BitArray{1}})[1])
+@test c[1] == string(first(methods(CompletionFoo.test5, Tuple{BitArray{1}})))
+
+s = "CompletionFoo.test4(CompletionFoo.test_y_array[1]()[1], CompletionFoo.test_y_array[1]()[2], "
+c, r, res = test_complete(s)
+@test !res
+@test length(c) == 1
+@test c[1] == string(first(methods(CompletionFoo.test4, Tuple{String, String})))
+
+# Test that string escaption is handled correct
+s = """CompletionFoo.test4("\\"","""
+c, r, res = test_complete(s)
+@test !res
+@test length(c) == 2
 
 ########## Test where the current inference logic fails ########
 # Fails due to inferrence fails to determine a concrete type for arg 1
@@ -296,6 +324,37 @@ c, r, res = test_complete(s)
 @test !res
 @test length(c) == 2
 #################################################################
+
+# Test of inference based getfield completion
+s = "\"\"."
+c,r = test_complete(s)
+@test length(c)==1
+@test r == (endof(s)+1):endof(s)
+@test c[1] == "data"
+
+s = "(\"\"*\"\")."
+c,r = test_complete(s)
+@test length(c)==1
+@test r == (endof(s)+1):endof(s)
+@test c[1] == "data"
+
+s = "CompletionFoo.test_y_array[1]."
+c,r = test_complete(s)
+@test length(c)==1
+@test r == (endof(s)+1):endof(s)
+@test c[1] == "yy"
+
+s = "CompletionFoo.Test_y(rand()).y"
+c,r = test_complete(s)
+@test length(c)==1
+@test r == endof(s):endof(s)
+@test c[1] == "yy"
+
+s = "CompletionFoo.test6()[1](CompletionFoo.Test_y(rand())).y"
+c,r = test_complete(s)
+@test length(c)==1
+@test r == endof(s):endof(s)
+@test c[1] == "yy"
 
 # Test completion in multi-line comments
 s = "#=\n\\alpha"
@@ -377,9 +436,9 @@ c, r, res = test_scomplete(s)
 
 # The return type is of importance, before #8995 it would return nothing
 # which would raise an error in the repl code.
-@test (UTF8String[], 0:-1, false) == test_scomplete("\$a")
+@test (String[], 0:-1, false) == test_scomplete("\$a")
 
-@unix_only begin
+if is_unix()
     #Assume that we can rely on the existence and accessibility of /tmp
 
     # Tests path in Julia code and closing " if it's a file
@@ -510,7 +569,7 @@ c, r, res = test_scomplete(s)
             withenv("PATH" => string(tempdir(), ":", dir)) do
                 s = string("repl-completio")
                 c,r = test_scomplete(s)
-                @test [utf8("repl-completion")] == c
+                @test ["repl-completion"] == c
                 @test s[r] == "repl-completio"
             end
 
@@ -530,12 +589,12 @@ let #test that it can auto complete with spaces in file/path
     mkdir(dir)
     cd(path) do
         open(joinpath(space_folder, "space .file"),"w") do f
-            s = @windows? "rm $dir_space\\\\space" : "cd $dir_space/space"
+            s = is_windows() ? "rm $dir_space\\\\space" : "cd $dir_space/space"
             c,r = test_scomplete(s)
             @test r == endof(s)-4:endof(s)
             @test "space\\ .file" in c
 
-            s = @windows? "cd(\"β $dir_space\\\\space" : "cd(\"β $dir_space/space"
+            s = is_windows() ? "cd(\"β $dir_space\\\\space" : "cd(\"β $dir_space/space"
             c,r = test_complete(s)
             @test r == endof(s)-4:endof(s)
             @test "space\\ .file\"" in c
@@ -553,7 +612,7 @@ end
 c,r = test_complete("cd(\"folder_do_not_exist_77/file")
 @test length(c) == 0
 
-@windows_only begin
+if is_windows()
     tmp = tempname()
     path = dirname(tmp)
     file = basename(tmp)
@@ -577,7 +636,7 @@ c,r = test_complete("cd(\"folder_do_not_exist_77/file")
         s = "cd(\"$(file[1:2])"
         c,r = test_complete(s)
         @test r == length(s) - 1:length(s)
-        @test file  in c
+        @test (length(c) > 1 && file in c) || (["$file\""] == c)
     end
     rm(tmp)
 end

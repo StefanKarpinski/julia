@@ -15,7 +15,7 @@ export
 import Base:
     Display,
     display,
-    writemime,
+    show,
     AnyDict,
     ==
 
@@ -111,7 +111,7 @@ end
 function display(d::REPLDisplay, ::MIME"text/plain", x)
     io = outstream(d.repl)
     Base.have_color && write(io, answer_color(d.repl))
-    writemime(io, MIME("text/plain"), x)
+    show(IOContext(io, multiline=true, limit=true), MIME("text/plain"), x)
     println(io)
 end
 display(d::REPLDisplay, x) = display(d, MIME("text/plain"), x)
@@ -163,6 +163,7 @@ function run_repl(repl::AbstractREPL, consumer = x->nothing)
     repl_channel = Channel(1)
     response_channel = Channel(1)
     backend = start_repl_backend(repl_channel, response_channel)
+    consumer(backend)
     run_frontend(repl, REPLBackendRef(repl_channel,response_channel))
     return backend
 end
@@ -230,11 +231,11 @@ end
 type LineEditREPL <: AbstractREPL
     t::TextTerminal
     hascolor::Bool
-    prompt_color::AbstractString
-    input_color::AbstractString
-    answer_color::AbstractString
-    shell_color::AbstractString
-    help_color::AbstractString
+    prompt_color::String
+    input_color::String
+    answer_color::String
+    shell_color::String
+    help_color::String
     history_file::Bool
     in_shell::Bool
     in_help::Bool
@@ -271,10 +272,10 @@ end
 
 immutable LatexCompletions <: CompletionProvider; end
 
-bytestring_beforecursor(buf::IOBuffer) = bytestring(buf.data[1:buf.ptr-1])
+beforecursor(buf::IOBuffer) = String(buf.data[1:buf.ptr-1])
 
 function complete_line(c::REPLCompletionProvider, s)
-    partial = bytestring_beforecursor(s.input_buffer)
+    partial = beforecursor(s.input_buffer)
     full = LineEdit.input_string(s)
     ret, range, should_complete = completions(full, endof(partial))
     return ret, partial[range], should_complete
@@ -282,14 +283,14 @@ end
 
 function complete_line(c::ShellCompletionProvider, s)
     # First parse everything up to the current position
-    partial = bytestring_beforecursor(s.input_buffer)
+    partial = beforecursor(s.input_buffer)
     full = LineEdit.input_string(s)
     ret, range, should_complete = shell_completions(full, endof(partial))
     return ret, partial[range], should_complete
 end
 
 function complete_line(c::LatexCompletions, s)
-    partial = bytestring_beforecursor(LineEdit.buffer(s))
+    partial = beforecursor(LineEdit.buffer(s))
     full = LineEdit.input_string(s)
     ret, range, should_complete = bslash_completions(full, endof(partial))[2]
     return ret, partial[range], should_complete
@@ -297,8 +298,9 @@ end
 
 
 type REPLHistoryProvider <: HistoryProvider
-    history::Array{AbstractString,1}
+    history::Array{String,1}
     history_file
+    start_idx::Int
     cur_idx::Int
     last_idx::Int
     last_buffer::IOBuffer
@@ -307,7 +309,7 @@ type REPLHistoryProvider <: HistoryProvider
     modes::Array{Symbol,1}
 end
 REPLHistoryProvider(mode_mapping) =
-    REPLHistoryProvider(AbstractString[], nothing, 0, -1, IOBuffer(),
+    REPLHistoryProvider(String[], nothing, 0, 0, -1, IOBuffer(),
                         nothing, mode_mapping, UInt8[])
 
 const invalid_history_message = """
@@ -322,11 +324,11 @@ An editor may have converted tabs to spaces at line """
 
 function hist_getline(file)
     while !eof(file)
-        line = utf8(readline(file))
+        line = readline(file)
         isempty(line) && return line
         line[1] in "\r\n" || return line
     end
-    return utf8("")
+    return ""
 end
 
 function hist_from_file(hp, file)
@@ -344,7 +346,7 @@ function hist_from_file(hp, file)
             m = match(r"^#\s*(\w+)\s*:\s*(.*?)\s*$", line)
             m === nothing && break
             if m.captures[1] == "mode"
-                mode = symbol(m.captures[2])
+                mode = Symbol(m.captures[2])
             end
             line = hist_getline(file)
             countlines += 1
@@ -355,11 +357,11 @@ function hist_from_file(hp, file)
             error(munged_history_message, countlines)
         line[1] != '\t' &&
             error(invalid_history_message, repr(line[1]), " at line ", countlines)
-        lines = UTF8String[]
+        lines = String[]
         while !isempty(line)
             push!(lines, chomp(line[2:end]))
             eof(file) && break
-            ch = Base.peek(file)
+            ch = Char(Base.peek(file))
             ch == ' '  && error(munged_history_message, countlines)
             ch != '\t' && break
             line = hist_getline(file)
@@ -369,23 +371,24 @@ function hist_from_file(hp, file)
         push!(hp.history, join(lines, '\n'))
     end
     seekend(file)
+    hp.start_idx = length(hp.history)
     hp
 end
 
 function mode_idx(hist::REPLHistoryProvider, mode)
     c = :julia
     for (k,v) in hist.mode_mapping
-        v == mode && (c = k)
+        isequal(v, mode) && (c = k)
     end
     return c
 end
 
 function add_history(hist::REPLHistoryProvider, s)
-    str = rstrip(bytestring(s.input_buffer))
+    str = rstrip(String(s.input_buffer))
     isempty(strip(str)) && return
     mode = mode_idx(hist, LineEdit.mode(s))
     !isempty(hist.history) &&
-        mode == hist.modes[end] && str == hist.history[end] && return
+        isequal(mode, hist.modes[end]) && str == hist.history[end] && return
     push!(hist.modes, mode)
     push!(hist.history, str)
     hist.history_file === nothing && return
@@ -455,13 +458,13 @@ function history_prev(s::LineEdit.MIState, hist::REPLHistoryProvider,
         save_idx::Int = hist.cur_idx)
     hist.last_idx = -1
     m = history_move(s, hist, hist.cur_idx-1, save_idx)
-    if m == :ok
+    if m === :ok
         LineEdit.move_input_start(s)
         LineEdit.reset_key_repeats(s) do
             LineEdit.move_line_end(s)
         end
         LineEdit.refresh_line(s)
-    elseif m == :skip
+    elseif m === :skip
         hist.cur_idx -= 1
         history_prev(s, hist, save_idx)
     else
@@ -479,10 +482,10 @@ function history_next(s::LineEdit.MIState, hist::REPLHistoryProvider,
         hist.last_idx = -1
     end
     m = history_move(s, hist, cur_idx+1, save_idx)
-    if m == :ok
+    if m === :ok
         LineEdit.move_input_end(s)
         LineEdit.refresh_line(s)
-    elseif m == :skip
+    elseif m === :skip
         hist.cur_idx += 1
         history_next(s, hist, save_idx)
     else
@@ -495,7 +498,7 @@ function history_move_prefix(s::LineEdit.PrefixSearchState,
                              prefix::AbstractString,
                              backwards::Bool,
                              cur_idx = hist.cur_idx)
-    cur_response = bytestring(LineEdit.buffer(s))
+    cur_response = String(LineEdit.buffer(s))
     # when searching forward, start at last_idx
     if !backwards && hist.last_idx > 0
         cur_idx = hist.last_idx
@@ -506,7 +509,7 @@ function history_move_prefix(s::LineEdit.PrefixSearchState,
     for idx in idxs
         if (idx == max_idx) || (startswith(hist.history[idx], prefix) && (hist.history[idx] != cur_response || hist.modes[idx] != LineEdit.mode(s)))
             m = history_move(s, hist, idx)
-            if m == :ok
+            if m === :ok
                 if idx == max_idx
                     # on resuming the in-progress edit, leave the cursor where the user last had it
                 elseif isempty(prefix)
@@ -518,7 +521,7 @@ function history_move_prefix(s::LineEdit.PrefixSearchState,
                 end
                 LineEdit.refresh_line(s)
                 return :ok
-            elseif m == :skip
+            elseif m === :skip
                 return history_move_prefix(s,hist,prefix,backwards,idx)
             end
         end
@@ -535,8 +538,8 @@ function history_search(hist::REPLHistoryProvider, query_buffer::IOBuffer, respo
 
     qpos = position(query_buffer)
     qpos > 0 || return true
-    searchdata = bytestring_beforecursor(query_buffer)
-    response_str = bytestring(response_buffer)
+    searchdata = beforecursor(query_buffer)
+    response_str = String(response_buffer)
 
     # Alright, first try to see if the current match still works
     a = position(response_buffer) + 1
@@ -566,7 +569,7 @@ function history_search(hist::REPLHistoryProvider, query_buffer::IOBuffer, respo
         if match != 0:-1 && h != response_str && haskey(hist.mode_mapping, hist.modes[idx])
             truncate(response_buffer, 0)
             write(response_buffer, h)
-            seek(response_buffer, prevind(response_str, first(match)))
+            seek(response_buffer, prevind(h, first(match)))
             hist.cur_idx = idx
             return true
         end
@@ -587,7 +590,7 @@ const julia_green = "\033[1m\033[32m"
 
 function return_callback(s)
     ast = Base.syntax_deprecation_warnings(false) do
-        Base.parse_input_line(bytestring(LineEdit.buffer(s)))
+        Base.parse_input_line(String(LineEdit.buffer(s)))
     end
     if  !isa(ast, Expr) || (ast.head != :continue && ast.head != :incomplete)
         return true
@@ -665,6 +668,9 @@ function mode_keymap(julia_prompt)
     end)
 end
 
+repl_filename(repl, hp::REPLHistoryProvider) = "REPL[$(length(hp.history)-hp.start_idx)]"
+repl_filename(repl, hp) = "REPL"
+
 function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_repl_keymap = Dict{Any,Any}[])
     ###
     #
@@ -705,8 +711,6 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
         complete = replc,
         on_enter = return_callback)
 
-    julia_prompt.on_done = respond(Base.parse_input_line, repl, julia_prompt)
-
     # Setup help mode
     help_mode = Prompt("help?> ",
         prompt_prefix = hascolor ? repl.help_color : "",
@@ -728,7 +732,7 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
         # and pass into Base.repl_cmd for processing (handles `ls` and `cd`
         # special)
         on_done = respond(repl, julia_prompt) do line
-            Expr(:call, :(Base.repl_cmd), macroexpand(Expr(:macrocall, symbol("@cmd"),line)), outstream(repl))
+            Expr(:call, :(Base.repl_cmd), macroexpand(Expr(:macrocall, Symbol("@cmd"),line)), outstream(repl))
         end)
 
 
@@ -755,6 +759,9 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     julia_prompt.hist = hp
     shell_mode.hist = hp
     help_mode.hist = hp
+
+    julia_prompt.on_done = respond(x->Base.parse_input_line(x,filename=repl_filename(repl,hp)), repl, julia_prompt)
+
 
     search_prompt, skeymap = LineEdit.setup_search_keymap(hp)
     search_prompt.complete = LatexCompletions()
@@ -887,9 +894,9 @@ end
 
 type StreamREPL <: AbstractREPL
     stream::IO
-    prompt_color::AbstractString
-    input_color::AbstractString
-    answer_color::AbstractString
+    prompt_color::String
+    input_color::String
+    answer_color::String
     waserror::Bool
     StreamREPL(stream,pc,ic,ac) = new(stream,pc,ic,ac,false)
 end

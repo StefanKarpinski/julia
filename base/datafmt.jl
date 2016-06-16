@@ -4,7 +4,7 @@
 
 module DataFmt
 
-import Base: _default_delims, tryparse_internal, writemime
+import Base: _default_delims, tryparse_internal, show
 
 export countlines, readdlm, readcsv, writedlm, writecsv
 
@@ -18,12 +18,13 @@ const offs_chunk_size = 5000
 countlines(f::AbstractString, eol::Char='\n') = open(io->countlines(io,eol), f)::Int
 function countlines(io::IO, eol::Char='\n')
     isascii(eol) || throw(ArgumentError("only ASCII line terminators are supported"))
-    a = Array(UInt8, 8192)
+    aeol = UInt8(eol)
+    a = Array{UInt8}(8192)
     nl = 0
     while !eof(io)
         nb = readbytes!(io, a)
         @simd for i=1:nb
-            @inbounds nl += a[i] == eol
+            @inbounds nl += a[i] == aeol
         end
     end
     nl
@@ -35,34 +36,28 @@ readdlm(input, dlm::Char, T::Type; opts...) = readdlm(input, dlm, T, '\n'; opts.
 readdlm(input; opts...) = readdlm(input, invalid_dlm(Char), '\n'; opts...)
 readdlm(input, dlm::Char; opts...) = readdlm(input, dlm, '\n'; opts...)
 
-readdlm(input, dlm::Char, eol::Char; opts...) = readdlm_auto(input, dlm, Float64, eol, true; opts...)
-readdlm(input, dlm::Char, T::Type, eol::Char; opts...) = readdlm_auto(input, dlm, T, eol, false; opts...)
+readdlm(input, dlm::Char, eol::Char; opts...) =
+    readdlm_auto(input, dlm, Float64, eol, true; opts...)
+readdlm(input, dlm::Char, T::Type, eol::Char; opts...) =
+    readdlm_auto(input, dlm, T, eol, false; opts...)
 
-function readdlm_auto(input, dlm::Char, T::Type, eol::Char, auto::Bool; opts...)
+readdlm_auto(input::Vector{UInt8}, dlm::Char, T::Type, eol::Char, auto::Bool; opts...) =
+    readdlm_string(String(input), dlm, T, eol, auto, val_opts(opts))
+readdlm_auto(input::IO, dlm::Char, T::Type, eol::Char, auto::Bool; opts...) =
+    readdlm_string(readstring(input), dlm, T, eol, auto, val_opts(opts))
+function readdlm_auto(input::AbstractString, dlm::Char, T::Type, eol::Char, auto::Bool; opts...)
     optsd = val_opts(opts)
-    use_mmap = get(optsd, :use_mmap, @windows ? false : true)
-    if isa(input, AbstractString)
-        fsz = filesize(input)
-        if use_mmap && fsz > 0 && fsz < typemax(Int)
-            input = as_mmap(input, fsz)
-        else
-            input = readstring(input)
-        end
+    use_mmap = get(optsd, :use_mmap, is_windows() ? false : true)
+    fsz = filesize(input)
+    if use_mmap && fsz > 0 && fsz < typemax(Int)
+        a = Mmap.mmap(input, Vector{UInt8}, (Int(fsz),))
+        # TODO: It would be nicer to use String(a) without making a copy,
+        # but because the mmap'ed array is not NUL-terminated this causes
+        # jl_try_substrtod to segfault below.
+        return readdlm_string(String(copy(a)), dlm, T, eol, auto, optsd)
+    else
+        return readdlm_string(readstring(input), dlm, T, eol, auto, optsd)
     end
-    sinp = isa(input, Vector{UInt8}) ? bytestring(input) :
-           isa(input, IO) ? readstring(input) :
-           input
-    readdlm_string(sinp, dlm, T, eol, auto, optsd)
-end
-
-function as_mmap(fname::AbstractString, fsz::Int64)
-    open(fname) do io
-        Mmap.mmap(io, Vector{UInt8}, (Int(fsz),))
-    end
-end
-
-function ascii_if_possible(sbuff::AbstractString)
-    isascii(sbuff) ? convert(ASCIIString, sbuff) : sbuff
 end
 
 #
@@ -79,15 +74,16 @@ type DLMOffsets <: DLMHandler
     thresh::Int
     bufflen::Int
 
-    function DLMOffsets(sbuff::ByteString)
-        offsets = Array(Array{Int,1}, 1)
-        offsets[1] = Array(Int, offs_chunk_size)
+    function DLMOffsets(sbuff::String)
+        offsets = Array{Array{Int,1}}(1)
+        offsets[1] = Array{Int}(offs_chunk_size)
         thresh = ceil(min(typemax(UInt), Base.Sys.total_memory()) / sizeof(Int) / 5)
         new(offsets, 1, thresh, length(sbuff.data))
     end
 end
 
-function store_cell(dlmoffsets::DLMOffsets, row::Int, col::Int, quoted::Bool, startpos::Int, endpos::Int)
+function store_cell(dlmoffsets::DLMOffsets, row::Int, col::Int,
+        quoted::Bool, startpos::Int, endpos::Int)
     offidx = dlmoffsets.offidx
     (offidx == 0) && return     # offset collection stopped to avoid choking on memory
 
@@ -104,7 +100,7 @@ function store_cell(dlmoffsets::DLMOffsets, row::Int, col::Int, quoted::Bool, st
                 return
             end
         end
-        offsets = Array(Int, offs_chunk_size)
+        offsets = Array{Int}(offs_chunk_size)
         push!(oarr, offsets)
         offidx = 1
     end
@@ -123,7 +119,7 @@ function result(dlmoffsets::DLMOffsets)
     dlmoffsets.oarr
 end
 
-type DLMStore{T,S<:ByteString} <: DLMHandler
+type DLMStore{T} <: DLMHandler
     hdr::Array{AbstractString, 2}
     data::Array{T, 2}
 
@@ -132,32 +128,39 @@ type DLMStore{T,S<:ByteString} <: DLMHandler
     lastrow::Int
     lastcol::Int
     hdr_offset::Int
-    sbuff::S
+    sbuff::String
     auto::Bool
     eol::Char
 end
 
-function DLMStore{T,S<:ByteString}(::Type{T}, dims::NTuple{2,Integer}, has_header::Bool, sbuff::S, auto::Bool, eol::Char)
+function DLMStore{T}(::Type{T}, dims::NTuple{2,Integer},
+        has_header::Bool, sbuff::String, auto::Bool, eol::Char)
     (nrows,ncols) = dims
     nrows <= 0 && throw(ArgumentError("number of rows in dims must be > 0, got $nrows"))
     ncols <= 0 && throw(ArgumentError("number of columns in dims must be > 0, got $ncols"))
     hdr_offset = has_header ? 1 : 0
-    DLMStore{T,S}(fill(SubString(sbuff,1,0), 1, ncols), Array(T, nrows-hdr_offset, ncols), nrows, ncols, 0, 0, hdr_offset, sbuff, auto, eol)
+    DLMStore{T}(fill(SubString(sbuff,1,0), 1, ncols), Array{T}(nrows-hdr_offset, ncols),
+        nrows, ncols, 0, 0, hdr_offset, sbuff, auto, eol)
 end
 
-_chrinstr(sbuff::ByteString, chr::UInt8, startpos::Int, endpos::Int) = (endpos >= startpos) && (C_NULL != ccall(:memchr, Ptr{UInt8}, (Ptr{UInt8}, Int32, Csize_t), pointer(sbuff.data)+startpos-1, chr, endpos-startpos+1))
+_chrinstr(sbuff::String, chr::UInt8, startpos::Int, endpos::Int) =
+    (endpos >= startpos) && (C_NULL != ccall(:memchr, Ptr{UInt8},
+    (Ptr{UInt8}, Int32, Csize_t), pointer(sbuff.data)+startpos-1, chr, endpos-startpos+1))
 
-function store_cell{T,S<:ByteString}(dlmstore::DLMStore{T,S}, row::Int, col::Int, quoted::Bool, startpos::Int, endpos::Int)
+function store_cell{T}(dlmstore::DLMStore{T}, row::Int, col::Int,
+        quoted::Bool, startpos::Int, endpos::Int)
     drow = row - dlmstore.hdr_offset
 
     ncols = dlmstore.ncols
     lastcol = dlmstore.lastcol
     lastrow = dlmstore.lastrow
     cells::Array{T,2} = dlmstore.data
-    sbuff::S = dlmstore.sbuff
+    sbuff = dlmstore.sbuff
 
     endpos = prevind(sbuff, nextind(sbuff,endpos))
-    (endpos > 0) && ('\n' == dlmstore.eol) && ('\r' == Char(sbuff[endpos])) && (endpos = prevind(sbuff, endpos))
+    if (endpos > 0) && ('\n' == dlmstore.eol) && ('\r' == Char(sbuff[endpos]))
+        endpos = prevind(sbuff, endpos)
+    end
     if quoted
         startpos += 1
         endpos -= 1
@@ -191,7 +194,11 @@ function store_cell{T,S<:ByteString}(dlmstore::DLMStore{T,S}, row::Int, col::Int
         end
         if fail
             sval = SubString(sbuff, startpos, endpos)
-            ((T <: Number) && dlmstore.auto) ? throw(TypeError(:store_cell, "", Any, T)) : error("file entry \"$(sval)\" cannot be converted to $T")
+            if (T <: Number) && dlmstore.auto
+                throw(TypeError(:store_cell, "", Any, T))
+            else
+                error("file entry \"$(sval)\" cannot be converted to $T")
+            end
         end
 
         dlmstore.lastrow = drow
@@ -239,7 +246,7 @@ function result{T}(dlmstore::DLMStore{T})
 end
 
 
-function readdlm_string(sbuff::ByteString, dlm::Char, T::Type, eol::Char, auto::Bool, optsd::Dict)
+function readdlm_string(sbuff::String, dlm::Char, T::Type, eol::Char, auto::Bool, optsd::Dict)
     ign_empty = (dlm == invalid_dlm(Char))
     quotes = get(optsd, :quotes, true)
     comments = get(optsd, :comments, true)
@@ -263,8 +270,6 @@ function readdlm_string(sbuff::ByteString, dlm::Char, T::Type, eol::Char, auto::
         catch ex
             if isa(ex, TypeError) && (ex.func == :store_cell)
                 T = ex.expected
-            elseif get(optsd, :ignore_invalid_chars, false)
-                sbuff = ascii_if_possible(convert(typeof(sbuff), sbuff.data, ""))
             else
                 rethrow(ex)
             end
@@ -281,8 +286,8 @@ function readdlm_string(sbuff::ByteString, dlm::Char, T::Type, eol::Char, auto::
     return readdlm_string(sbuff, dlm, T, eol, auto, optsd)
 end
 
-const valid_opts = [:header, :has_header, :ignore_invalid_chars, :use_mmap, :quotes, :comments, :dims, :comment_char, :skipstart, :skipblanks]
-const valid_opt_types = [Bool, Bool, Bool, Bool, Bool, Bool, NTuple{2,Integer}, Char, Integer, Bool]
+const valid_opts = [:header, :has_header, :use_mmap, :quotes, :comments, :dims, :comment_char, :skipstart, :skipblanks]
+const valid_opt_types = [Bool, Bool, Bool, Bool, Bool, NTuple{2,Integer}, Char, Integer, Bool]
 const deprecated_opts = Dict(:has_header => :header)
 function val_opts(opts)
     d = Dict{Symbol,Union{Bool,NTuple{2,Integer},Char,Integer}}()
@@ -296,7 +301,7 @@ function val_opts(opts)
     d
 end
 
-function dlm_fill(T::DataType, offarr::Vector{Vector{Int}}, dims::NTuple{2,Integer}, has_header::Bool, sbuff::ByteString, auto::Bool, eol::Char)
+function dlm_fill(T::DataType, offarr::Vector{Vector{Int}}, dims::NTuple{2,Integer}, has_header::Bool, sbuff::String, auto::Bool, eol::Char)
     idx = 1
     offidx = 1
     offsets = offarr[1]
@@ -322,31 +327,31 @@ function dlm_fill(T::DataType, offarr::Vector{Vector{Int}}, dims::NTuple{2,Integ
     end
 end
 
-function colval{S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, cells::Array{Bool,2}, row::Int, col::Int)
+function colval(sbuff::String, startpos::Int, endpos::Int, cells::Array{Bool,2}, row::Int, col::Int)
     n = tryparse_internal(Bool, sbuff, startpos, endpos, false)
     isnull(n) || (cells[row, col] = get(n))
     isnull(n)
 end
-function colval{T<:Integer, S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, cells::Array{T,2}, row::Int, col::Int)
+function colval{T<:Integer}(sbuff::String, startpos::Int, endpos::Int, cells::Array{T,2}, row::Int, col::Int)
     n = tryparse_internal(T, sbuff, startpos, endpos, 0, false)
     isnull(n) || (cells[row, col] = get(n))
     isnull(n)
 end
-function colval(sbuff::ByteString, startpos::Int, endpos::Int, cells::Array{Float64,2}, row::Int, col::Int)
+function colval(sbuff::String, startpos::Int, endpos::Int, cells::Array{Float64,2}, row::Int, col::Int)
     n = ccall(:jl_try_substrtod, Nullable{Float64}, (Ptr{UInt8},Csize_t,Csize_t), sbuff, startpos-1, endpos-startpos+1)
     isnull(n) || (cells[row, col] = get(n))
     isnull(n)
 end
-function colval(sbuff::ByteString, startpos::Int, endpos::Int, cells::Array{Float32,2}, row::Int, col::Int)
+function colval(sbuff::String, startpos::Int, endpos::Int, cells::Array{Float32,2}, row::Int, col::Int)
     n = ccall(:jl_try_substrtof, Nullable{Float32}, (Ptr{UInt8}, Csize_t, Csize_t), sbuff, startpos-1, endpos-startpos+1)
     isnull(n) || (cells[row, col] = get(n))
     isnull(n)
 end
-function colval{T<:AbstractString, S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, cells::Array{T,2}, row::Int, col::Int)
+function colval{T<:AbstractString}(sbuff::String, startpos::Int, endpos::Int, cells::Array{T,2}, row::Int, col::Int)
     cells[row, col] = SubString(sbuff, startpos, endpos)
     return false
 end
-function colval{S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, cells::Array{Any,2}, row::Int, col::Int)
+function colval(sbuff::String, startpos::Int, endpos::Int, cells::Array{Any,2}, row::Int, col::Int)
     # if array is of Any type, attempt parsing only the most common types: Int, Bool, Float64 and fallback to SubString
     len = endpos-startpos+1
     if len > 0
@@ -365,7 +370,7 @@ function colval{S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, cells::Arra
     cells[row, col] = SubString(sbuff, startpos, endpos)
     false
 end
-function colval{T<:Char, S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, cells::Array{T,2}, row::Int, col::Int)
+function colval{T<:Char}(sbuff::String, startpos::Int, endpos::Int, cells::Array{T,2}, row::Int, col::Int)
     if startpos == endpos
         cells[row, col] = next(sbuff, startpos)[1]
         return false
@@ -373,15 +378,7 @@ function colval{T<:Char, S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, ce
         return true
     end
 end
-colval{S<:ByteString}(sbuff::S, startpos::Int, endpos::Int, cells::Array, row::Int, col::Int) = true
-
-function dlm_parse(s::ASCIIString, eol::Char, dlm::Char, qchar::Char, cchar::Char,
-                   ign_adj_dlm::Bool, allow_quote::Bool, allow_comments::Bool,
-                   skipstart::Int, skipblanks::Bool, dh::DLMHandler)
-    dlm_parse(s.data, reinterpret(UInt32, eol) % UInt8, reinterpret(UInt32, dlm) % UInt8,
-              reinterpret(UInt32, qchar) % UInt8, reinterpret(UInt32, cchar) % UInt8,
-              ign_adj_dlm, allow_quote, allow_comments, skipstart, skipblanks, dh)
-end
+colval(sbuff::String, startpos::Int, endpos::Int, cells::Array, row::Int, col::Int) = true
 
 function dlm_parse{T,D}(dbuff::T, eol::D, dlm::D, qchar::D, cchar::D,
                         ign_adj_dlm::Bool, allow_quote::Bool, allow_comments::Bool,
@@ -390,7 +387,7 @@ function dlm_parse{T,D}(dbuff::T, eol::D, dlm::D, qchar::D, cchar::D,
                                  isascii(dlm) &&
                                  (!allow_quote || isascii(qchar)) &&
                                  (!allow_comments || isascii(cchar)))
-    if (T <: UTF8String) && all_ascii
+    if T === String && all_ascii
         return dlm_parse(dbuff.data, eol % UInt8, dlm % UInt8, qchar % UInt8, cchar % UInt8,
                          ign_adj_dlm, allow_quote, allow_comments, skipstart, skipblanks, dh)
     end
@@ -567,12 +564,11 @@ function writedlm(io::IO, a::AbstractMatrix, dlm; opts...)
     optsd = val_opts(opts)
     quotes = get(optsd, :quotes, true)
     pb = PipeBuffer()
-    nr = size(a, 1)
-    nc = size(a, 2)
-    for i = 1:nr
-        for j = 1:nc
+    lastc = last(indices(a, 2))
+    for i = indices(a, 1)
+        for j = indices(a, 2)
             writedlm_cell(pb, a[i, j], dlm, quotes)
-            j == nc ? write(pb,'\n') : print(pb,dlm)
+            j == lastc ? write(pb,'\n') : print(pb,dlm)
         end
         (nb_available(pb) > (16*1024)) && write(io, takebuf_array(pb))
     end
@@ -623,7 +619,7 @@ end
 writedlm(io, a; opts...) = writedlm(io, a, '\t'; opts...)
 writecsv(io, a; opts...) = writedlm(io, a, ','; opts...)
 
-writemime(io::IO, ::MIME"text/csv", a) = writedlm(io, a, ',')
-writemime(io::IO, ::MIME"text/tab-separated-values", a) = writedlm(io, a, '\t')
+show(io::IO, ::MIME"text/csv", a) = writedlm(io, a, ',')
+show(io::IO, ::MIME"text/tab-separated-values", a) = writedlm(io, a, '\t')
 
 end # module DataFmt

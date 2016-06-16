@@ -30,7 +30,7 @@ import Base: log, exp, sin, cos, tan, sinh, cosh, tanh, asin,
              significand_mask, significand_bits, exponent_bits, exponent_bias
 
 
-import Core.Intrinsics: nan_dom_err, sqrt_llvm, box, unbox, powi_llvm
+import Core.Intrinsics: sqrt_llvm, box, unbox, powi_llvm
 
 # non-type specific math functions
 
@@ -42,7 +42,7 @@ clamp{X,L,H}(x::X, lo::L, hi::H) =
 
 clamp{T}(x::AbstractArray{T,1}, lo, hi) = [clamp(xx, lo, hi) for xx in x]
 clamp{T}(x::AbstractArray{T,2}, lo, hi) =
-    [clamp(x[i,j], lo, hi) for i in 1:size(x,1), j in 1:size(x,2)]
+    [clamp(x[i,j], lo, hi) for i in indices(x,1), j in indices(x,2)]
 clamp{T}(x::AbstractArray{T}, lo, hi) =
     reshape([clamp(xx, lo, hi) for xx in x], size(x))
 
@@ -71,10 +71,10 @@ macro evalpoly(z, p...)
     b = :($(esc(p[end-1])))
     as = []
     for i = length(p)-2:-1:1
-        ai = symbol("a", i)
+        ai = Symbol("a", i)
         push!(as, :($ai = $a))
         a = :(muladd(r, $ai, $b))
-        b = :(muladd(-s, $ai, $(esc(p[i]))))
+        b = :($(esc(p[i])) - s * $ai) # see issue #15985 on fused mul-subtract
     end
     ai = :a0
     push!(as, :($ai = $a))
@@ -82,10 +82,10 @@ macro evalpoly(z, p...)
              :(x = real(tt)),
              :(y = imag(tt)),
              :(r = x + x),
-             :(s = x*x + y*y),
+             :(s = muladd(x, x, y*y)),
              as...,
              :(muladd($ai, tt, $b)))
-    R = Expr(:macrocall, symbol("@horner"), :tt, map(esc, p)...)
+    R = Expr(:macrocall, Symbol("@horner"), :tt, map(esc, p)...)
     :(let tt = $(esc(z))
           isa(tt, Complex) ? $C : $R
       end)
@@ -129,6 +129,9 @@ exp10(x::Float64) = 10.0^x
 exp10(x::Float32) = 10.0f0^x
 exp10(x::Integer) = exp10(float(x))
 @vectorize_1arg Number exp10
+
+# utility for converting NaN return to DomainError
+@inline nan_dom_err(f, x) = isnan(f) & !isnan(x) ? throw(DomainError()) : f
 
 # functions that return NaN on non-NaN argument for domain error
 for f in (:sin, :cos, :tan, :asin, :acos, :acosh, :atanh, :log, :log2, :log10,
@@ -181,7 +184,7 @@ end
 """
     hypot(x...)
 
-Compute the hypotenuse ``\\sqrt{\\sum x_i}`` avoiding overflow and underflow.
+Compute the hypotenuse ``\\sqrt{\\sum x_i^2}`` avoiding overflow and underflow.
 """
 hypot(x::Number...) = vecnorm(x)
 
@@ -266,7 +269,7 @@ end
 
 function frexp{T<:AbstractFloat}(A::Array{T})
     F = similar(A)
-    E = Array(Int, size(A))
+    E = Array{Int}(size(A))
     for (iF, iE, iA) in zip(eachindex(F), eachindex(E), eachindex(A))
         F[iF], E[iE] = frexp(A[iA])
     end
@@ -350,6 +353,15 @@ const pi3o2_l  = 1.8369701987210297e-16 # convert(Float64, pi * BigFloat(3/2) - 
 const pi4o2_h  = 6.283185307179586      # convert(Float64, pi * BigFloat(2))
 const pi4o2_l  = 2.4492935982947064e-16 # convert(Float64, pi * BigFloat(2) - pi4o2_h)
 
+"""
+    mod2pi(x)
+
+Modulus after division by `2π`, returning in the range ``[0,2π)``.
+
+This function computes a floating point representation of the modulus after division by
+numerically exact `2π`, and is therefore not exactly the same as `mod(x,2π)`, which would
+compute the modulus of `x` relative to division by the floating-point number `2π`.
+"""
 function mod2pi(x::Float64) # or modtau(x)
 # with r = mod2pi(x)
 # a) 0 <= r < 2π  (note: boundary open or closed - a bit fuzzy, due to rem_pio2 implementation)

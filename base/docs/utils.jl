@@ -2,7 +2,7 @@
 
 # Text / HTML objects
 
-import Base: print, writemime
+import Base: print, show
 
 export HTML, @html_str
 
@@ -26,13 +26,13 @@ end
 function HTML(xs...)
     HTML() do io
         for x in xs
-            writemime(io, MIME"text/html"(), x)
+            show(io, MIME"text/html"(), x)
         end
     end
 end
 
-writemime(io::IO, ::MIME"text/html", h::HTML) = print(io, h.content)
-writemime{F <: Function}(io::IO, ::MIME"text/html", h::HTML{F}) = h.content(io)
+show(io::IO, ::MIME"text/html", h::HTML) = print(io, h.content)
+show{F <: Function}(io::IO, ::MIME"text/html", h::HTML{F}) = h.content(io)
 
 """
     @html_str -> Docs.HTML
@@ -46,7 +46,7 @@ end
 function catdoc(xs::HTML...)
     HTML() do io
         for x in xs
-            writemime(io, MIME"text/html"(), x)
+            show(io, MIME"text/html"(), x)
         end
     end
 end
@@ -70,7 +70,7 @@ end
 
 print(io::IO, t::Text) = print(io, t.content)
 print{F <: Function}(io::IO, t::Text{F}) = t.content(io)
-writemime(io::IO, ::MIME"text/plain", t::Text) = print(io, t)
+show(io::IO, t::Text) = print(io, t)
 
 """
     @text_str -> Docs.Text
@@ -84,7 +84,7 @@ end
 function catdoc(xs::Text...)
     Text() do io
         for x in xs
-            writemime(io, MIME"text/plain"(), x)
+            show(io, MIME"text/plain"(), x)
         end
     end
 end
@@ -94,10 +94,10 @@ end
 function helpmode(line::AbstractString)
     line = strip(line)
     expr =
-        if haskey(keywords, symbol(line))
+        if haskey(keywords, Symbol(line))
             # Docs for keywords must be treated separately since trying to parse a single
             # keyword such as `function` would throw a parse error due to the missing `end`.
-            symbol(line)
+            Symbol(line)
         else
             x = Base.syntax_deprecation_warnings(false) do
                 parse(line, raise = false)
@@ -141,7 +141,7 @@ function repl(s::Symbol)
     end
 end
 
-isregex(x) = isexpr(x, :macrocall, 2) && x.args[1] == symbol("@r_str") && !isempty(x.args[2])
+isregex(x) = isexpr(x, :macrocall, 2) && x.args[1] === Symbol("@r_str") && !isempty(x.args[2])
 
 repl(ex::Expr) = isregex(ex) ? :(apropos($ex)) : _repl(ex)
 
@@ -154,7 +154,7 @@ function _repl(x)
     if isexpr(x, :call)
         # Handles function call syntax where each argument is an atom (symbol, number, etc.)
         t = Base.gen_call_with_extracted_types(doc, x)
-        (isexpr(t, :call, 3) && t.args[1] == doc) && (docs = t)
+        (isexpr(t, :call, 3) && t.args[1] === doc) && (docs = t)
     end
     if isfield(x)
         quote
@@ -223,7 +223,7 @@ function levenshtein(s1, s2)
     a, b = collect(s1), collect(s2)
     m = length(a)
     n = length(b)
-    d = Array(Int, m+1, n+1)
+    d = Array{Int}(m+1, n+1)
 
     d[1:m+1, 1] = 0:m
     d[1, 1:n+1] = 0:n
@@ -284,7 +284,7 @@ function print_joined_cols(io::IO, ss, delim = "", last = delim; cols = displays
         total += length(ss[i])
         total + max(i-2,0)*length(delim) + (i>1?1:0)*length(last) > cols && (i-=1; break)
     end
-    print_joined(io, ss[1:i], delim, last)
+    join(io, ss[1:i], delim, last)
 end
 
 print_joined_cols(args...; cols = displaysize(STDOUT)[2]) = print_joined_cols(STDOUT, args...; cols=cols)

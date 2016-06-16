@@ -27,12 +27,12 @@ IOBuffer(data::AbstractVector{UInt8}, readable::Bool=true, writable::Bool=false,
     AbstractIOBuffer(data, readable, writable, true, false, maxsize)
 IOBuffer(readable::Bool, writable::Bool) = IOBuffer(UInt8[], readable, writable)
 IOBuffer() = IOBuffer(true, true)
-IOBuffer(maxsize::Int) = (x=IOBuffer(Array(UInt8,maxsize), true, true, maxsize); x.size=0; x)
+IOBuffer(maxsize::Int) = (x=IOBuffer(Array{UInt8}(maxsize), true, true, maxsize); x.size=0; x)
 
 # PipeBuffers behave like Unix Pipes. They are typically readable and writable, they act appendable, and are not seekable.
 PipeBuffer(data::Vector{UInt8}=UInt8[], maxsize::Int=typemax(Int)) =
     AbstractIOBuffer(data,true,true,false,true,maxsize)
-PipeBuffer(maxsize::Int) = (x = PipeBuffer(Array(UInt8,maxsize),maxsize); x.size=0; x)
+PipeBuffer(maxsize::Int) = (x = PipeBuffer(Array{UInt8}(maxsize),maxsize); x.size=0; x)
 
 function copy(b::AbstractIOBuffer)
     ret = typeof(b)(b.writable ? copy(b.data) : b.data,
@@ -216,21 +216,20 @@ end
 
 isopen(io::AbstractIOBuffer) = io.readable || io.writable || io.seekable || nb_available(io) > 0
 
-function bytestring(io::AbstractIOBuffer)
-    io.readable || throw(ArgumentError("bytestring read failed, IOBuffer is not readable"))
-    io.seekable || throw(ArgumentError("bytestring read failed, IOBuffer is not seekable"))
-    b = copy!(Array(UInt8, io.size), 1, io.data, 1, io.size)
-    return isvalid(ASCIIString, b) ? ASCIIString(b) : UTF8String(b)
+function String(io::AbstractIOBuffer)
+    io.readable || throw(ArgumentError("IOBuffer is not readable"))
+    io.seekable || throw(ArgumentError("IOBuffer is not seekable"))
+    return String(copy!(Array{UInt8}(io.size), 1, io.data, 1, io.size))
 end
 
 function takebuf_array(io::AbstractIOBuffer)
     ismarked(io) && unmark(io)
     if io.seekable
         nbytes = io.size
-        data = copy!(Array(UInt8, nbytes), 1, io.data, 1, nbytes)
+        data = copy!(Array{UInt8}(nbytes), 1, io.data, 1, nbytes)
     else
         nbytes = nb_available(io)
-        data = read!(io, Array(UInt8, nbytes))
+        data = read!(io,Array{UInt8}(nbytes))
     end
     if io.writable
         io.ptr = 1
@@ -244,14 +243,14 @@ function takebuf_array(io::IOBuffer)
         data = io.data
         if io.writable
             maxsize = (io.maxsize == typemax(Int) ? 0 : min(length(io.data),io.maxsize))
-            io.data = Array(UInt8,maxsize)
+            io.data = Array{UInt8}(maxsize)
         else
             data = copy(data)
         end
         resize!(data,io.size)
     else
         nbytes = nb_available(io)
-        a = Array(UInt8, nbytes)
+        a = Array{UInt8}(nbytes)
         data = read!(io, a)
     end
     if io.writable
@@ -260,10 +259,7 @@ function takebuf_array(io::IOBuffer)
     end
     return data
 end
-function takebuf_string(io::AbstractIOBuffer)
-    b = takebuf_array(io)
-    return isvalid(ASCIIString, b) ? ASCIIString(b) : UTF8String(b)
-end
+takebuf_string(io::AbstractIOBuffer) = String(takebuf_array(io))
 
 function write(to::AbstractIOBuffer, from::AbstractIOBuffer)
     if to === from
@@ -331,9 +327,9 @@ function readbytes!(io::AbstractIOBuffer, b::Array{UInt8}, nb::Int)
     read_sub(io, b, 1, nr)
     return nr
 end
-read(io::AbstractIOBuffer) = read!(io, Array(UInt8, nb_available(io)))
+read(io::AbstractIOBuffer) = read!(io,Array{UInt8}(nb_available(io)))
 readavailable(io::AbstractIOBuffer) = read(io)
-read(io::AbstractIOBuffer, nb::Integer) = read!(io, Array(UInt8, min(nb, nb_available(io))))
+read(io::AbstractIOBuffer, nb::Integer) = read!(io,Array{UInt8}(min(nb, nb_available(io))))
 
 function search(buf::IOBuffer, delim::UInt8)
     p = pointer(buf.data, buf.ptr)
@@ -355,7 +351,7 @@ end
 
 function readuntil(io::AbstractIOBuffer, delim::UInt8)
     lb = 70
-    A = Array(UInt8, lb)
+    A = Array{UInt8}(lb)
     n = 0
     data = io.data
     for i = io.ptr : io.size

@@ -19,7 +19,7 @@ function paragraph(stream::IO, md::MD)
     while !eof(stream)
         char = read(stream, Char)
         if char == '\n' || char == '\r'
-            char == '\r' && peek(stream) == '\n' && read(stream, Char)
+            char == '\r' && Char(peek(stream)) == '\n' && read(stream, Char)
             if prev_char == '\\'
                 write(buffer, '\n')
             elseif blankline(stream) || parse(stream, md, breaking = true)
@@ -97,8 +97,8 @@ end
 # ––––
 
 type Code
-    language::UTF8String
-    code::UTF8String
+    language::String
+    code::String
 end
 
 Code(code) = Code("", code)
@@ -198,7 +198,7 @@ function list(stream::IO, block::MD)
                 c = read(stream, Char)
                 if c == '\n'
                     eof(stream) && break
-                    next = peek(stream)
+                    next = Char(peek(stream)) # ok since we only compare with ASCII
                     if next == '\n'
                         break
                     else

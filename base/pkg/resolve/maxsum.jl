@@ -79,7 +79,6 @@ type Graph
     np::Int
 
     function Graph(interface::Interface)
-
         deps = interface.deps
         np = interface.np
 
@@ -176,7 +175,6 @@ type Messages
     num_nondecimated::Int
 
     function Messages(interface::Interface, graph::Graph)
-
         reqs = interface.reqs
         pkgs = interface.pkgs
         np = interface.np
@@ -237,7 +235,7 @@ function getsolution(msgs::Messages)
 
     fld = msgs.fld
     np = length(fld)
-    sol = Array(Int, np)
+    sol = Array{Int}(np)
     for p0 = 1:np
         fld0 = fld[p0]
         s0 = indmax(fld0)
@@ -253,7 +251,6 @@ end
 # for a given node p0 (i.e. a package) updates all
 # input cavity messages and fields of its neighbors
 function update(p0::Int, graph::Graph, msgs::Messages)
-
     gadj = graph.gadj
     gmsk = graph.gmsk
     gdir = graph.gdir
@@ -366,7 +363,6 @@ end
 # Call update for all nodes (i.e. packages) in
 # random order
 function iterate(graph::Graph, msgs::Messages)
-
     np = graph.np
 
     maxdiff = zero(FieldValue)
@@ -444,7 +440,6 @@ end
 # Iterative solver: run iterate() until convergence
 # (occasionally calling decimate())
 function maxsum(graph::Graph, msgs::Messages)
-
     params = MaxSumParams()
 
     it = 0

@@ -60,10 +60,14 @@ test_inlined_symbols(test_outer, Tuple{Int64})
         return y
     end
 end
-function bar()
+function bar12620()
     for i = 1:3
         foo_inl(i==1)
     end
 end
-@test_throws UndefVarError bar()
+@test_throws UndefVarError bar12620()
 
+# issue #16165
+@inline f16165(x) = (x = UInt(x) + 1)
+g16165(x) = f16165(x)
+@test g16165(1) === (UInt(1) + 1)

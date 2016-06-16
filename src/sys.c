@@ -110,19 +110,8 @@ JL_DLLEXPORT int32_t jl_nb_available(ios_t *s)
 // --- dir/file stuff ---
 
 JL_DLLEXPORT int jl_sizeof_uv_fs_t(void) { return sizeof(uv_fs_t); }
-JL_DLLEXPORT void jl_uv_fs_req_cleanup(uv_fs_t *req)
-{
-    uv_fs_req_cleanup(req);
-}
-
-JL_DLLEXPORT int jl_readdir(const char *path, uv_fs_t *readdir_req)
-{
-    // Note that the flags field is mostly ignored by libuv
-    return uv_fs_readdir(uv_default_loop(), readdir_req, path, 0 /*flags*/, NULL);
-}
-
+JL_DLLEXPORT void jl_uv_fs_req_cleanup(uv_fs_t *req) { uv_fs_req_cleanup(req); }
 JL_DLLEXPORT char *jl_uv_fs_t_ptr(uv_fs_t *req) { return (char*)req->ptr; }
-JL_DLLEXPORT char *jl_uv_fs_t_ptr_offset(uv_fs_t *req, int offset) { return (char*)req->ptr + offset; }
 JL_DLLEXPORT int jl_uv_fs_result(uv_fs_t *f) { return f->result; }
 
 // --- stat ---
@@ -697,9 +686,9 @@ static BOOL CALLBACK jl_EnumerateLoadedModulesProc64(
 )
 {
     jl_array_grow_end((jl_array_t*)a, 1);
-    //XXX: change to jl_arrayset if array storage allocation for Array{ByteString,1} changes:
+    //XXX: change to jl_arrayset if array storage allocation for Array{String,1} changes:
     jl_value_t *v = jl_cstr_to_string(ModuleName);
-    jl_cellset(a, jl_array_dim0(a)-1, v);
+    jl_array_ptr_set(a, jl_array_dim0(a)-1, v);
     return TRUE;
 }
 // Takes a handle (as returned from dlopen()) and returns the absolute path to the image loaded
@@ -719,28 +708,14 @@ JL_DLLEXPORT void jl_raise_debugger(void)
 #endif // _OS_WINDOWS_
 }
 
-JL_DLLEXPORT jl_sym_t *jl_get_OS_NAME(void)
+JL_DLLEXPORT jl_sym_t *jl_get_UNAME(void)
 {
-#if defined(_OS_WINDOWS_)
-    return jl_symbol("Windows");
-#elif defined(_OS_LINUX_)
-    return jl_symbol("Linux");
-#elif defined(_OS_FREEBSD_)
-    return jl_symbol("FreeBSD");
-#elif defined(_OS_DARWIN_)
-    return jl_symbol("Darwin");
-#else
-#warning OS_NAME is Unknown
-    return jl_symbol("Unknown");
-#endif
+    return jl_symbol(JL_BUILD_UNAME);
 }
 
 JL_DLLEXPORT jl_sym_t *jl_get_ARCH(void)
 {
-    static jl_sym_t *ARCH = NULL;
-    if (!ARCH)
-        ARCH = (jl_sym_t*) jl_get_global(jl_base_module, jl_symbol("ARCH"));
-    return ARCH;
+    return jl_symbol(JL_BUILD_ARCH);
 }
 
 JL_DLLEXPORT size_t jl_maxrss(void)

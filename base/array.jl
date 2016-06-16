@@ -15,10 +15,11 @@ typealias DenseVecOrMat{T} Union{DenseVector{T}, DenseMatrix{T}}
 size(a::Array, d) = arraysize(a, d)
 size(a::Vector) = (arraysize(a,1),)
 size(a::Matrix) = (arraysize(a,1), arraysize(a,2))
-size{_}(a::Array{_,3}) = (arraysize(a,1), arraysize(a,2), arraysize(a,3))
-size{_}(a::Array{_,4}) = (arraysize(a,1), arraysize(a,2), arraysize(a,3), arraysize(a,4))
+size(a::Array) = _size((), a)
+_size{_,N}(out::NTuple{N}, A::Array{_,N}) = out
+_size{_,M,N}(out::NTuple{M}, A::Array{_,N}) = _size((out..., size(A,M+1)), A)
+
 asize_from(a::Array, n) = n > ndims(a) ? () : (arraysize(a,n), asize_from(a, n+1)...)
-size{_,N}(a::Array{_,N}) = asize_from(a, 1)::NTuple{N,Int}
 
 length(a::Array) = arraylen(a)
 elsize{T}(a::Array{T}) = isbits(T) ? sizeof(T) : sizeof(Ptr)
@@ -55,7 +56,8 @@ end
 
 function copy!{T}(dest::Array{T}, doffs::Integer, src::Array{T}, soffs::Integer, n::Integer)
     n == 0 && return dest
-    if n < 0 || soffs < 1 || doffs < 1 || soffs+n-1 > length(src) || doffs+n-1 > length(dest)
+    n > 0 || throw(ArgumentError(string("tried to copy n=", n, " elements, but n should be nonnegative")))
+    if soffs < 1 || doffs < 1 || soffs+n-1 > length(src) || doffs+n-1 > length(dest)
         throw(BoundsError())
     end
     unsafe_copy!(dest, doffs, src, soffs, n)
@@ -117,32 +119,34 @@ end
 
 ## Constructors ##
 
-similar(a::Array, T, dims::Dims)      = Array(T, dims)
-similar{T}(a::Array{T,1})             = Array(T, size(a,1))
-similar{T}(a::Array{T,2})             = Array(T, size(a,1), size(a,2))
-similar{T}(a::Array{T,1}, dims::Dims) = Array(T, dims)
-similar{T}(a::Array{T,1}, m::Int)     = Array(T, m)
-similar{T}(a::Array{T,1}, S)          = Array(S, size(a,1))
-similar{T}(a::Array{T,2}, dims::Dims) = Array(T, dims)
-similar{T}(a::Array{T,2}, m::Int)     = Array(T, m)
-similar{T}(a::Array{T,2}, S)          = Array(S, size(a,1), size(a,2))
+similar(a::Array, T::Type, dims::Dims) = Array{T}(dims)
+similar{T}(a::Array{T,1})              = Array{T}(size(a,1))
+similar{T}(a::Array{T,2})              = Array{T}(size(a,1), size(a,2))
+similar{T}(a::Array{T,1}, dims::Dims)  = Array{T}(dims)
+similar{T}(a::Array{T,1}, m::Int)      = Array{T}(m)
+similar{T}(a::Array{T,1}, S::Type)     = Array{S}(size(a,1))
+similar{T}(a::Array{T,2}, dims::Dims)  = Array{T}(dims)
+similar{T}(a::Array{T,2}, m::Int)      = Array{T}(m)
+similar{T}(a::Array{T,2}, S::Type)     = Array{S}(size(a,1), size(a,2))
 
 # T[x...] constructs Array{T,1}
 function getindex(T::Type, vals...)
-    a = Array(T,length(vals))
+    a = Array{T}(length(vals))
     @inbounds for i = 1:length(vals)
         a[i] = vals[i]
     end
     return a
 end
+getindex(T::Type) = Array{T}(0)
 
 function getindex(::Type{Any}, vals::ANY...)
-    a = Array(Any,length(vals))
+    a = Array{Any}(length(vals))
     @inbounds for i = 1:length(vals)
         a[i] = vals[i]
     end
     return a
 end
+getindex(::Type{Any}) = Array{Any}(0)
 
 function fill!(a::Union{Array{UInt8}, Array{Int8}}, x::Integer)
     ccall(:memset, Ptr{Void}, (Ptr{Void}, Cint, Csize_t), a, x, length(a))
@@ -157,16 +161,13 @@ function fill!{T<:Union{Integer,AbstractFloat}}(a::Array{T}, x)
     return a
 end
 
-fill(v, dims::Dims)       = fill!(Array(typeof(v), dims), v)
-fill(v, dims::Integer...) = fill!(Array(typeof(v), dims...), v)
-
-cell(dims::Integer...)   = Array(Any, dims...)
-cell(dims::Tuple{Vararg{Integer}}) = Array(Any, convert(Tuple{Vararg{Int}}, dims))
+fill(v, dims::Dims)       = fill!(Array{typeof(v)}(dims), v)
+fill(v, dims::Integer...) = fill!(Array{typeof(v)}(dims...), v)
 
 for (fname, felt) in ((:zeros,:zero), (:ones,:one))
     @eval begin
-        ($fname)(T::Type, dims...)       = fill!(Array(T, dims...), ($felt)(T))
-        ($fname)(dims...)                = fill!(Array(Float64, dims...), ($felt)(Float64))
+        ($fname)(T::Type, dims...)       = fill!(Array{T}(dims...), ($felt)(T))
+        ($fname)(dims...)                = fill!(Array{Float64}(dims...), ($felt)(Float64))
         ($fname){T}(A::AbstractArray{T}) = fill!(similar(A), ($felt)(T))
     end
 end
@@ -195,7 +196,7 @@ convert{T,n}(::Type{Array{T}}, x::Array{T,n}) = x
 convert{T,n}(::Type{Array{T,n}}, x::Array{T,n}) = x
 
 convert{T,n,S}(::Type{Array{T}}, x::AbstractArray{S, n}) = convert(Array{T, n}, x)
-convert{T,n,S}(::Type{Array{T,n}}, x::AbstractArray{S,n}) = copy!(Array(T, size(x)), x)
+convert{T,n,S}(::Type{Array{T,n}}, x::AbstractArray{S,n}) = copy!(Array{T}(size(x)), x)
 
 promote_rule{T,n,S}(::Type{Array{T,n}}, ::Type{Array{S,n}}) = Array{promote_type(T,S),n}
 
@@ -234,12 +235,16 @@ function _collect(cont, itr, ::HasEltype, isz::SizeUnknown)
     return a
 end
 
-_collect(c, itr, ::EltypeUnknown, isz::SizeUnknown) = grow_to!(_similar_for(c, Union{}, itr, isz), itr)
+_default_eltype(itr::ANY) = Union{}
+_default_eltype{I,T}(::Generator{I,Type{T}}) = T
+
+_collect(c, itr, ::EltypeUnknown, isz::SizeUnknown) =
+    grow_to!(_similar_for(c, _default_eltype(itr), itr, isz), itr)
 
 function _collect(c, itr, ::EltypeUnknown, isz::Union{HasLength,HasShape})
     st = start(itr)
     if done(itr,st)
-        return _similar_for(c, Union{}, itr, isz)
+        return _similar_for(c, _default_eltype(itr), itr, isz)
     end
     v1, st = next(itr, st)
     collect_to_with_first!(_similar_for(c, typeof(v1), itr, isz), v1, itr, st)
@@ -295,14 +300,14 @@ end
 
 ## Iteration ##
 start(A::Array) = 1
-next(a::Array,i) = (a[i],i+1)
-done(a::Array,i) = i == length(a)+1
+next(a::Array,i) = (@_propagate_inbounds_meta; (a[i],i+1))
+done(a::Array,i) = (@_inline_meta; i == length(a)+1)
 
 ## Indexing: getindex ##
 
 # This is more complicated than it needs to be in order to get Win64 through bootstrap
 getindex(A::Array, i1::Real) = arrayref(A, to_index(i1))
-getindex(A::Array, i1::Real, i2::Real, I::Real...) = arrayref(A, to_index(i1), to_index(i2), to_indexes(I...)...)
+getindex(A::Array, i1::Real, i2::Real, I::Real...) = arrayref(A, to_index(i1), to_index(i2), to_indexes(I...)...) # TODO: REMOVE FOR #14770
 
 # Faster contiguous indexing using copy! for UnitRange and Colon
 function getindex(A::Array, I::UnitRange{Int})
@@ -331,7 +336,7 @@ end
 
 ## Indexing: setindex! ##
 setindex!{T}(A::Array{T}, x, i1::Real) = arrayset(A, convert(T,x)::T, to_index(i1))
-setindex!{T}(A::Array{T}, x, i1::Real, i2::Real, I::Real...) = arrayset(A, convert(T,x)::T, to_index(i1), to_index(i2), to_indexes(I...)...)
+setindex!{T}(A::Array{T}, x, i1::Real, i2::Real, I::Real...) = arrayset(A, convert(T,x)::T, to_index(i1), to_index(i2), to_indexes(I...)...) # TODO: REMOVE FOR #14770
 
 # These are redundant with the abstract fallbacks but needed for bootstrap
 function setindex!(A::Array, x, I::AbstractVector{Int})
@@ -376,6 +381,9 @@ function setindex!{T}(A::Array{T}, X::Array{T}, c::Colon)
     end
     return A
 end
+
+setindex!(A::Array, x::Number, ::Colon) = fill!(A, x)
+setindex!{T, N}(A::Array{T, N}, x::Number, ::Vararg{Colon, N}) = fill!(A, x)
 
 # efficiently grow an array
 
@@ -643,7 +651,7 @@ end
 function lexcmp(a::Array{UInt8,1}, b::Array{UInt8,1})
     c = ccall(:memcmp, Int32, (Ptr{UInt8}, Ptr{UInt8}, UInt),
               a, b, min(length(a),length(b)))
-    c < 0 ? -1 : c > 0 ? +1 : cmp(length(a),length(b))
+    return c < 0 ? -1 : c > 0 ? +1 : cmp(length(a),length(b))
 end
 
 function reverse(A::AbstractVector, s=1, n=length(A))
@@ -657,7 +665,7 @@ function reverse(A::AbstractVector, s=1, n=length(A))
     for i = n+1:length(A)
         B[i] = A[i]
     end
-    B
+    return B
 end
 reverseind(a::AbstractVector, i::Integer) = length(a) + 1 - i
 
@@ -673,7 +681,7 @@ function reverse!(v::AbstractVector, s=1, n=length(v))
         v[i], v[r] = v[r], v[i]
         r -= 1
     end
-    v
+    return v
 end
 
 function vcat{T}(arrays::Vector{T}...)
@@ -681,13 +689,13 @@ function vcat{T}(arrays::Vector{T}...)
     for a in arrays
         n += length(a)
     end
-    arr = Array(T, n)
+    arr = Array{T}(n)
     ptr = pointer(arr)
     offset = 0
     if isbits(T)
         elsz = sizeof(T)
     else
-        elsz = div(WORD_SIZE,8)
+        elsz = Core.sizeof(Ptr{Void})
     end
     for a in arrays
         nba = length(a)*elsz
@@ -705,9 +713,25 @@ function hcat{T}(V::Vector{T}...)
             throw(DimensionMismatch("vectors must have same lengths"))
         end
     end
-    [ V[j][i]::T for i=1:length(V[1]), j=1:length(V) ]
+    return [ V[j][i]::T for i=1:length(V[1]), j=1:length(V) ]
 end
 
+hcat(A::Matrix...) = typed_hcat(promote_eltype(A...), A...)
+hcat{T}(A::Matrix{T}...) = typed_hcat(T, A...)
+
+vcat(A::Matrix...) = typed_vcat(promote_eltype(A...), A...)
+vcat{T}(A::Matrix{T}...) = typed_vcat(T, A...)
+
+hcat(A::Union{Matrix, Vector}...) = typed_hcat(promote_eltype(A...), A...)
+hcat{T}(A::Union{Matrix{T}, Vector{T}}...) = typed_hcat(T, A...)
+
+
+vcat(A::Union{Matrix, Vector}...) = typed_vcat(promote_eltype(A...), A...)
+vcat{T}(A::Union{Matrix{T}, Vector{T}}...) = typed_vcat(T, A...)
+
+
+hvcat(rows::Tuple{Vararg{Int}}, xs::Matrix...) = typed_hvcat(promote_eltype(xs...), rows, xs...)
+hvcat{T}(rows::Tuple{Vararg{Int}}, xs::Matrix{T}...) = typed_hvcat(T, rows, xs...)
 
 ## find ##
 
@@ -749,7 +773,7 @@ function findprev(A, start::Integer)
     for i = start:-1:1
         A[i] != 0 && return i
     end
-    0
+    return 0
 end
 findlast(A) = findprev(A, length(A))
 
@@ -758,7 +782,7 @@ function findprev(A, v, start::Integer)
     for i = start:-1:1
         A[i] == v && return i
     end
-    0
+    return 0
 end
 findlast(A, v) = findprev(A, v, length(A))
 
@@ -767,27 +791,27 @@ function findprev(testf::Function, A, start::Integer)
     for i = start:-1:1
         testf(A[i]) && return i
     end
-    0
+    return 0
 end
 findlast(testf::Function, A) = findprev(testf, A, length(A))
 
-function find(testf::Function, A::AbstractArray)
+function find(testf::Function, A)
     # use a dynamic-length array to store the indexes, then copy to a non-padded
     # array for the return
-    tmpI = Array(Int, 0)
+    tmpI = Array{Int}(0)
     for (i,a) = enumerate(A)
         if testf(a)
             push!(tmpI, i)
         end
     end
-    I = Array(Int, length(tmpI))
+    I = Array{Int}(length(tmpI))
     copy!(I, tmpI)
-    I
+    return I
 end
 
-function find(A::AbstractArray)
+function find(A)
     nnzA = countnz(A)
-    I = similar(A, Int, nnzA)
+    I = Vector{Int}(nnzA)
     count = 1
     for (i,a) in enumerate(A)
         if a != 0
@@ -798,8 +822,8 @@ function find(A::AbstractArray)
     return I
 end
 
-find(x::Number) = x == 0 ? Array(Int,0) : [1]
-find(testf::Function, x::Number) = !testf(x) ? Array(Int,0) : [1]
+find(x::Number) = x == 0 ? Array{Int}(0) : [1]
+find(testf::Function, x::Number) = !testf(x) ? Array{Int}(0) : [1]
 
 findn(A::AbstractVector) = find(A)
 
@@ -822,7 +846,7 @@ function findnz{T}(A::AbstractMatrix{T})
     nnzA = countnz(A)
     I = zeros(Int, nnzA)
     J = zeros(Int, nnzA)
-    NZs = Array(T, nnzA)
+    NZs = Array{T}(nnzA)
     count = 1
     if nnzA > 0
         for j=1:size(A,2), i=1:size(A,1)
@@ -885,7 +909,7 @@ function indexin(a::AbstractArray, b::AbstractArray)
 end
 
 function findin(a, b)
-    ind = Array(Int, 0)
+    ind = Array{Int}(0)
     bset = Set(b)
     @inbounds for (i,ai) in enumerate(a)
         ai in bset && push!(ind, i)
@@ -894,6 +918,7 @@ function findin(a, b)
 end
 
 # Copying subregions
+# TODO: DEPRECATE FOR #14770
 function indcopy(sz::Dims, I::Vector)
     n = length(I)
     s = sz[n]
@@ -934,7 +959,7 @@ function filter!(f, a::Vector)
 end
 
 function filter(f, a::Vector)
-    r = Array(eltype(a), 0)
+    r = Array{eltype(a)}(0)
     for ai in a
         if f(ai)
             push!(r, ai)
@@ -947,7 +972,7 @@ end
 # These are moderately efficient, preserve order, and remove dupes.
 
 function intersect(v1, vs...)
-    ret = Array(eltype(v1),0)
+    ret = Array{eltype(v1)}(0)
     for v_elem in v1
         inall = true
         for vsi in vs
@@ -963,7 +988,7 @@ function intersect(v1, vs...)
 end
 
 function union(vs...)
-    ret = Array(promote_eltype(vs...),0)
+    ret = Array{promote_eltype(vs...)}(0)
     seen = Set()
     for v in vs
         for v_elem in v
@@ -979,7 +1004,7 @@ end
 function setdiff(a, b)
     args_type = promote_type(eltype(a), eltype(b))
     bset = Set(b)
-    ret = Array(args_type,0)
+    ret = Array{args_type}(0)
     seen = Set{eltype(a)}()
     for a_elem in a
         if !in(a_elem, seen) && !in(a_elem, bset)

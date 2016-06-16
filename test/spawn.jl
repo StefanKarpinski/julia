@@ -11,10 +11,12 @@
 #TODO:
 # - Windows:
 #   - Add a test whether coreutils are available and skip tests if not
-@windows_only oldpath = ENV["PATH"]
-@windows_only ENV["PATH"] = joinpath(JULIA_HOME,"..","Git","usr","bin")*";"*oldpath
+if is_windows()
+    oldpath = ENV["PATH"]
+    ENV["PATH"] = joinpath(JULIA_HOME, "..", "Git", "usr", "bin") * ";" * oldpath
+end
 
-valgrind_off = ccall(:jl_running_on_valgrind,Cint,()) == 0
+valgrind_off = ccall(:jl_running_on_valgrind, Cint, ()) == 0
 
 yes = `perl -le 'while (1) {print STDOUT "y"}'`
 
@@ -32,7 +34,7 @@ out = readstring(`echo hello` & `echo world`)
 @test (run(`printf "       \033[34m[stdio passthrough ok]\033[0m\n"`); true)
 
 # Test for SIGPIPE being treated as normal termination (throws an error if broken)
-@unix_only @test (run(pipeline(yes,`head`,DevNull)); true)
+is_unix() && run(pipeline(yes, `head`, DevNull))
 
 begin
     a = Base.Condition()
@@ -80,11 +82,11 @@ run(pipeline(`echo hello world`, file))
 rm(file)
 
 # Stream Redirection
-@unix_only begin
-    r = Channel(1)
+if !is_windows() # WINNT reports operation not supported on socket (ENOTSUP) for this test
+    local r = Channel(1), port, server, sock, client
     @async begin
         port, server = listenany(2326)
-        put!(r,port)
+        put!(r, port)
         client = accept(server)
         @test readstring(pipeline(client, `cat`)) == "hello world\n"
         close(server)
@@ -103,9 +105,12 @@ end
        readstring(`sh -c "echo \$TEST"`); end) == "Hello World\n"
 pathA = readchomp(setenv(`sh -c "pwd -P"`;dir=".."))
 pathB = readchomp(setenv(`sh -c "cd .. && pwd -P"`))
-@unix_only @test Base.samefile(pathA, pathB)
-# on windows, sh returns posix-style paths that are not valid according to ispath
-@windows_only @test pathA == pathB
+if is_windows()
+    # on windows, sh returns posix-style paths that are not valid according to ispath
+    @test pathA == pathB
+else
+    @test Base.samefile(pathA, pathB)
+end
 
 # Here we test that if we close a stream with pending writes, we don't lose the writes.
 str = ""
@@ -167,7 +172,7 @@ unmark(sock)
 @test_throws ArgumentError reset(sock)
 @test !unmark(sock)
 @test readline(sock) == "Goodbye, world...\n"
-#@test eof(sock) ## doesn't work...
+#@test eof(sock) ## doesn't work
 close(sock)
 
 # issue #4535
@@ -175,16 +180,16 @@ exename = Base.julia_cmd()
 if valgrind_off
     # If --trace-children=yes is passed to valgrind, we will get a
     # valgrind banner here, not "Hello World\n".
-    @test readstring(pipeline(`$exename -f -e 'println(STDERR,"Hello World")'`, stderr=`cat`)) == "Hello World\n"
+    @test readstring(pipeline(`$exename --startup-file=no -e 'println(STDERR,"Hello World")'`, stderr=`cat`)) == "Hello World\n"
     out = Pipe()
-    proc = spawn(pipeline(`$exename -f -e 'println(STDERR,"Hello World")'`, stderr = out))
+    proc = spawn(pipeline(`$exename --startup-file=no -e 'println(STDERR,"Hello World")'`, stderr = out))
     close(out.in)
     @test readstring(out) == "Hello World\n"
     @test success(proc)
 end
 
 # issue #6310
-@test readstring(pipeline(`echo "2+2"`, `$exename -f`)) == "4\n"
+@test readstring(pipeline(`echo "2+2"`, `$exename --startup-file=no`)) == "4\n"
 
 # issue #5904
 @test run(pipeline(ignorestatus(`false`), `true`)) === nothing
@@ -210,37 +215,39 @@ close(f)
 rm(fname)
 
 # Test that redirecting an IOStream does not crash the process
-fname = tempname()
-cmd = """
-# Overwrite libuv memory before freeing it, to make sure that a use after free
-# triggers an assertion.
-function thrash(handle::Ptr{Void})
-    # Kill the memory, but write a nice low value in the libuv type field to
-    # trigger the right code path
-    ccall(:memset,Ptr{Void},(Ptr{Void},Cint,Csize_t),handle,0xee,3*sizeof(Ptr{Void}))
-    unsafe_store!(convert(Ptr{Cint},handle+2*sizeof(Ptr{Void})),15)
-    nothing
+let fname = tempname()
+    cmd = """
+    # Overwrite libuv memory before freeing it, to make sure that a use after free
+    # triggers an assertion.
+    function thrash(handle::Ptr{Void})
+        # Kill the memory, but write a nice low value in the libuv type field to
+        # trigger the right code path
+        ccall(:memset,Ptr{Void},(Ptr{Void},Cint,Csize_t),handle,0xee,3*sizeof(Ptr{Void}))
+        unsafe_store!(convert(Ptr{Cint},handle+2*sizeof(Ptr{Void})),15)
+        nothing
+    end
+    OLD_STDERR = STDERR
+    redirect_stderr(open("$(escape_string(fname))","w"))
+    # Usually this would be done by GC. Do it manually, to make the failure
+    # case more reliable.
+    oldhandle = OLD_STDERR.handle
+    OLD_STDERR.status = Base.StatusClosing
+    OLD_STDERR.handle = C_NULL
+    ccall(:uv_close,Void,(Ptr{Void},Ptr{Void}),oldhandle,cfunction(thrash,Void,(Ptr{Void},)))
+    sleep(1)
+    import Base.zzzInvalidIdentifier
+    """
+    try
+        (in,p) = open(pipeline(`$exename --startup-file=no`, stderr=STDERR), "w")
+        write(in,cmd)
+        close(in)
+        wait(p)
+    catch
+        error("IOStream redirect failed. Child stderr was \n$(readstring(fname))\n")
+    finally
+        rm(fname)
+    end
 end
-OLD_STDERR = STDERR
-redirect_stderr(open("$(escape_string(fname))","w"))
-# Usually this would be done by GC. Do it manually, to make the failure
-# case more reliable.
-oldhandle = OLD_STDERR.handle
-OLD_STDERR.status = Base.StatusClosing
-OLD_STDERR.handle = C_NULL
-ccall(:uv_close,Void,(Ptr{Void},Ptr{Void}),oldhandle,cfunction(thrash,Void,(Ptr{Void},)))
-sleep(1)
-import Base.zzzInvalidIdentifier
-"""
-try
-    (in,p) = open(pipeline(`$exename -f`, stderr=STDERR), "w")
-    write(in,cmd)
-    close(in)
-    wait(p)
-catch
-    error("IOStream redirect failed. Child stderr was \n$(readstring(fname))\n")
-end
-rm(fname)
 
 # issue #10994: libuv can't handle strings containing NUL
 let bad = "bad\0name"
@@ -251,7 +258,7 @@ let bad = "bad\0name"
 end
 
 # issue #12829
-let out = Pipe(), echo = `$exename -f -e 'print(STDOUT, " 1\t", readstring(STDIN))'`, ready = Condition()
+let out = Pipe(), echo = `$exename --startup-file=no -e 'print(STDOUT, " 1\t", readstring(STDIN))'`, ready = Condition()
     @test_throws ArgumentError write(out, "not open error")
     @async begin # spawn writer task
         open(echo, "w", out) do in1
@@ -276,7 +283,7 @@ let out = Pipe(), echo = `$exename -f -e 'print(STDOUT, " 1\t", readstring(STDIN
     wait(ready) # wait for writer task to be ready before using `out`
     @test nb_available(out) == 0
     @test endswith(readuntil(out, '1'), '1')
-    @test read(out, UInt8) == '\t'
+    @test Char(read(out, UInt8)) == '\t'
     c = UInt8[0]
     @test c == read!(out, c)
     Base.wait_readnb(out, 1)
@@ -288,7 +295,7 @@ let out = Pipe(), echo = `$exename -f -e 'print(STDOUT, " 1\t", readstring(STDIN
     @test !iswritable(out)
     @test !isopen(out)
     @test nb_available(out) == 0
-    @test c == ['w']
+    @test c == UInt8['w']
     @test lstrip(ln2) == "1\thello\n"
     @test ln1 == "orld\n"
     @test isempty(read(out))
@@ -336,15 +343,18 @@ end
 @test_throws ErrorException collect(eachline(pipeline(`cat _doesnt_exist__111_`, stderr=DevNull)))
 
 # make sure windows_verbatim strips quotes
-@windows_only readstring(`cmd.exe /c dir /b spawn.jl`) == readstring(Cmd(`cmd.exe /c dir /b "\"spawn.jl\""`, windows_verbatim=true))
+if is_windows()
+    readstring(`cmd.exe /c dir /b spawn.jl`) == readstring(Cmd(`cmd.exe /c dir /b "\"spawn.jl\""`, windows_verbatim=true))
+end
 
 # make sure Cmd is nestable
 @test string(Cmd(Cmd(`ls`, detach=true))) == "`ls`"
 
-@windows_only ENV["PATH"] = oldpath
+if is_windows()
+    ENV["PATH"] = oldpath
+end
 
 # equality tests for Cmd
-
 @test Base.Cmd(``) == Base.Cmd(``)
 @test Base.Cmd(`lsof -i :9090`) == Base.Cmd(`lsof -i :9090`)
 @test Base.Cmd(`echo test`) == Base.Cmd(`echo test`)
@@ -354,3 +364,12 @@ end
 @test Base.Set([``, ``]) == Base.Set([``])
 @test Set([``, `echo`]) != Set([``, ``])
 @test Set([`echo`, ``, ``, `echo`]) == Set([`echo`, ``])
+
+# equality tests for AndCmds
+@test Base.AndCmds(`echo abc`, `echo def`) == Base.AndCmds(`echo abc`, `echo def`)
+@test Base.AndCmds(`echo abc`, `echo def`) != Base.AndCmds(`echo abc`, `echo xyz`)
+
+# tests for reducing over collection of Cmd
+@test_throws ArgumentError reduce(&, Base.AbstractCmd[])
+@test_throws ArgumentError reduce(&, Base.Cmd[])
+@test reduce(&, [`echo abc`, `echo def`, `echo hij`]) == `echo abc` & `echo def` & `echo hij`

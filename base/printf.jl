@@ -98,7 +98,7 @@ function parse1(s::AbstractString, k::Integer)
     while c in "#0- + '"
         c, k = next_or_die(s,k)
     end
-    flags = ascii(s[j:k-2])
+    flags = String(s[j:k-2])
     # parse width
     while '0' <= c <= '9'
         width = 10*width + c-'0'
@@ -135,7 +135,7 @@ end
 
 ### printf formatter generation ###
 
-function special_handler(flags::ASCIIString, width::Int)
+function special_handler(flags::String, width::Int)
     @gensym x
     blk = Expr(:block)
     pad = '-' in flags ? rpad : lpad
@@ -242,7 +242,7 @@ function print_exp_a(out, exp::Integer)
 end
 
 
-function gen_d(flags::ASCIIString, width::Int, precision::Int, c::Char)
+function gen_d(flags::String, width::Int, precision::Int, c::Char)
     # print integer:
     #  [dDiu]: print decimal digits
     #  [o]:    print octal digits
@@ -323,7 +323,7 @@ function gen_d(flags::ASCIIString, width::Int, precision::Int, c::Char)
     :(($x)::Real), ex
 end
 
-function gen_f(flags::ASCIIString, width::Int, precision::Int, c::Char)
+function gen_f(flags::String, width::Int, precision::Int, c::Char)
     # print to fixed trailing precision
     #  [fF]: the only choice
     #
@@ -385,7 +385,7 @@ function gen_f(flags::ASCIIString, width::Int, precision::Int, c::Char)
     :(($x)::Real), ex
 end
 
-function gen_e(flags::ASCIIString, width::Int, precision::Int, c::Char, inside_g::Bool=false)
+function gen_e(flags::String, width::Int, precision::Int, c::Char, inside_g::Bool=false)
     # print float in scientific form:
     #  [e]: use 'e' to introduce exponent
     #  [E]: use 'E' to introduce exponent
@@ -458,7 +458,7 @@ function gen_e(flags::ASCIIString, width::Int, precision::Int, c::Char, inside_g
     # print sign
     '+' in flags ? push!(blk.args, :(write(out, neg?'-':'+'))) :
     ' ' in flags ? push!(blk.args, :(write(out, neg?'-':' '))) :
-                    push!(blk.args, :(neg && write(out, '-')))
+                   push!(blk.args, :(neg && write(out, '-')))
     # print zero padding
     if padding !== nothing && !('-' in flags) && '0' in flags
         push!(blk.args, pad(width, padding, '0'))
@@ -468,7 +468,7 @@ function gen_e(flags::ASCIIString, width::Int, precision::Int, c::Char, inside_g
     if precision > 0
         if inside_g && !('#' in flags)
             push!(blk.args, :(endidx = $ndigits;
-                              while endidx > 1 && DIGITS[endidx] == '0'
+                              while endidx > 1 && DIGITS[endidx] == UInt8('0')
                                   endidx -= 1
                               end;
                               if endidx > 1
@@ -497,7 +497,7 @@ function gen_e(flags::ASCIIString, width::Int, precision::Int, c::Char, inside_g
     :(($x)::Real), ex
 end
 
-function gen_a(flags::ASCIIString, width::Int, precision::Int, c::Char)
+function gen_a(flags::String, width::Int, precision::Int, c::Char)
     # print float in hexadecimal format
     #  [a]: lowercase hex float, e.g. -0x1.cfp-2
     #  [A]: uppercase hex float, e.g. -0X1.CFP-2
@@ -605,7 +605,7 @@ function gen_a(flags::ASCIIString, width::Int, precision::Int, c::Char)
     :(($x)::Real), ex
 end
 
-function gen_c(flags::ASCIIString, width::Int, precision::Int, c::Char)
+function gen_c(flags::String, width::Int, precision::Int, c::Char)
     # print a character:
     #  [cC]: both the same for us (Unicode)
     #
@@ -626,7 +626,7 @@ function gen_c(flags::ASCIIString, width::Int, precision::Int, c::Char)
     :(($x)::Integer), blk
 end
 
-function gen_s(flags::ASCIIString, width::Int, precision::Int, c::Char)
+function gen_s(flags::String, width::Int, precision::Int, c::Char)
     # print a string:
     #  [sS]: both the same for us (Unicode)
     #
@@ -661,27 +661,27 @@ end
 
 # TODO: faster pointer printing.
 
-function gen_p(flags::ASCIIString, width::Int, precision::Int, c::Char)
+function gen_p(flags::String, width::Int, precision::Int, c::Char)
     # print pointer:
     #  [p]: the only option
     #
     @gensym x
     blk = Expr(:block)
-    ptrwidth = WORD_SIZE>>2
+    ptrwidth = Sys.WORD_SIZE>>2
     width -= ptrwidth+2
     if width > 0 && !('-' in flags)
         push!(blk.args, pad(width, width, ' '))
     end
     push!(blk.args, :(write(out, '0')))
     push!(blk.args, :(write(out, 'x')))
-    push!(blk.args, :(write(out, bytestring(hex(unsigned($x), $ptrwidth)))))
+    push!(blk.args, :(write(out, String(hex(unsigned($x), $ptrwidth)))))
     if width > 0 && '-' in flags
         push!(blk.args, pad(width, width, ' '))
     end
     :(($x)::Ptr), blk
 end
 
-function gen_g(flags::ASCIIString, width::Int, precision::Int, c::Char)
+function gen_g(flags::String, width::Int, precision::Int, c::Char)
     # print to fixed trailing precision
     #  [g]: lower case e on scientific
     #  [G]: Upper case e on scientific
@@ -734,7 +734,7 @@ function gen_g(flags::ASCIIString, width::Int, precision::Int, c::Char)
     # print space padding
     if !('-' in flags) && !('0' in flags)
         padexpr = dynamic_pad(:width, :padding, ' ')
-        push!(blk.args, :(if padding != nothing
+        push!(blk.args, :(if padding !== nothing
                           $padexpr; end))
     end
     # print sign
@@ -744,7 +744,7 @@ function gen_g(flags::ASCIIString, width::Int, precision::Int, c::Char)
     # print zero padding
     if !('-' in flags) && '0' in flags
         padexpr = dynamic_pad(:width, :padding, '0')
-        push!(blk.args, :(if padding != nothing
+        push!(blk.args, :(if padding !== nothing
                           $padexpr; end))
     end
     # finally print value
@@ -752,7 +752,7 @@ function gen_g(flags::ASCIIString, width::Int, precision::Int, c::Char)
     # print space padding
     if '-' in flags
         padexpr = dynamic_pad(:width, :padding, ' ')
-        push!(blk.args, :(if padding != nothing
+        push!(blk.args, :(if padding !== nothing
                           $padexpr; end))
     end
 
@@ -776,17 +776,17 @@ macro handle_zero(ex)
     end
 end
 
-decode_oct(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, decode_oct(d))
-decode_0ct(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, decode_0ct(d))
-decode_dec(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, decode_dec(d))
-decode_hex(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, decode_hex(d))
-decode_HEX(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, decode_HEX(d))
-fix_dec(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, fix_dec(d, precision))
-ini_dec(out, d, ndigits::Int, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, ini_dec(d, ndigits))
-ini_hex(out, d, ndigits::Int, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, ini_hex(d, ndigits))
-ini_HEX(out, d, ndigits::Int, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, ini_HEX(d, ndigits))
-ini_hex(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, ini_hex(d))
-ini_HEX(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char) = (true, ini_HEX(d))
+decode_oct(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, decode_oct(d))
+decode_0ct(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, decode_0ct(d))
+decode_dec(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, decode_dec(d))
+decode_hex(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, decode_hex(d))
+decode_HEX(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, decode_HEX(d))
+fix_dec(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, fix_dec(d, precision))
+ini_dec(out, d, ndigits::Int, flags::String, width::Int, precision::Int, c::Char) = (true, ini_dec(d, ndigits))
+ini_hex(out, d, ndigits::Int, flags::String, width::Int, precision::Int, c::Char) = (true, ini_hex(d, ndigits))
+ini_HEX(out, d, ndigits::Int, flags::String, width::Int, precision::Int, c::Char) = (true, ini_HEX(d, ndigits))
+ini_hex(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, ini_hex(d))
+ini_HEX(out, d, flags::String, width::Int, precision::Int, c::Char) = (true, ini_HEX(d))
 
 
 # fallbacks for Real types without explicit decode_* implementation
@@ -1081,13 +1081,13 @@ end
 ini_hex(x::Integer,ndigits::Int) = throw(MethodError(ini_hex,(x,ndigits)))
 
 #BigFloat
-fix_dec(out, d::BigFloat, flags::ASCIIString, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
-ini_dec(out, d::BigFloat, ndigits::Int, flags::ASCIIString, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
-ini_hex(out, d::BigFloat, ndigits::Int, flags::ASCIIString, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
-ini_HEX(out, d::BigFloat, ndigits::Int, flags::ASCIIString, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
-ini_hex(out, d::BigFloat, flags::ASCIIString, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
-ini_HEX(out, d::BigFloat, flags::ASCIIString, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
-function bigfloat_printf(out, d, flags::ASCIIString, width::Int, precision::Int, c::Char)
+fix_dec(out, d::BigFloat, flags::String, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
+ini_dec(out, d::BigFloat, ndigits::Int, flags::String, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
+ini_hex(out, d::BigFloat, ndigits::Int, flags::String, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
+ini_HEX(out, d::BigFloat, ndigits::Int, flags::String, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
+ini_hex(out, d::BigFloat, flags::String, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
+ini_HEX(out, d::BigFloat, flags::String, width::Int, precision::Int, c::Char) = bigfloat_printf(out, d, flags, width, precision, c)
+function bigfloat_printf(out, d, flags::String, width::Int, precision::Int, c::Char)
     fmt_len = sizeof(flags)+4
     if width > 0
         fmt_len += ndigits(width)
@@ -1132,7 +1132,7 @@ function _printf(macroname, io, fmt, args)
 
     has_splatting = false
     for arg in args
-       if typeof(arg) == Expr && arg.head == :...
+       if isa(arg, Expr) && arg.head == :...
           has_splatting = true
           break
        end

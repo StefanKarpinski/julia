@@ -9,10 +9,13 @@ if Base.JLOptions().code_coverage == 1
 elseif Base.JLOptions().code_coverage == 2
     cov_flag = `--code-coverage=all`
 end
-addprocs(3; exeflags=`$cov_flag $inline_flag --check-bounds=yes --depwarn=error`)
+
+# Test a `remote` invocation when no workers are present
+@test remote(myid)() == 1
+
+addprocs(4; exeflags=`$cov_flag $inline_flag --check-bounds=yes --depwarn=error`)
 
 # Test remote()
-
 let
     pool = Base.default_worker_pool()
 
@@ -223,7 +226,7 @@ test_indexing(RemoteChannel(id_other))
 
 dims = (20,20,20)
 
-@linux_only begin
+if is_linux()
     S = SharedArray(Int64, dims)
     @test startswith(S.segname, "/jl")
     @test !ispath("/dev/shm" * S.segname)
@@ -252,7 +255,7 @@ end
 d = Base.shmem_rand(1:100, dims)
 a = convert(Array, d)
 
-partsums = Array(Int, length(procs(d)))
+partsums = Array{Int}(length(procs(d)))
 @sync begin
     for (i, p) in enumerate(procs(d))
         @async partsums[i] = remotecall_fetch(p, d) do D
@@ -328,12 +331,13 @@ check_pids_all(S)
 filedata = similar(Atrue)
 read!(fn, filedata)
 @test filedata == sdata(S)
+finalize(S)
 
 # Error for write-only files
 @test_throws ArgumentError SharedArray(fn, Int, sz, mode="w")
 
 # Error for file doesn't exist, but not allowed to create
-@test_throws ArgumentError SharedArray(tempname(), Int, sz, mode="r")
+@test_throws ArgumentError SharedArray(joinpath(tempdir(),randstring()), Int, sz, mode="r")
 
 # Creating a new file
 fn2 = tempname()
@@ -342,6 +346,7 @@ S = SharedArray(fn2, Int, sz, init=D->D[localindexes(D)] = myid())
 filedata2 = similar(Atrue)
 read!(fn2, filedata2)
 @test filedata == filedata2
+finalize(S)
 
 # Appending to a file
 fn3 = tempname()
@@ -349,14 +354,18 @@ write(fn3, ones(UInt8, 4))
 S = SharedArray(fn3, UInt8, sz, 4, mode="a+", init=D->D[localindexes(D)]=0x02)
 len = prod(sz)+4
 @test filesize(fn3) == len
-filedata = Array(UInt8, len)
+filedata = Array{UInt8}(len)
 read!(fn3, filedata)
 @test all(filedata[1:4] .== 0x01)
 @test all(filedata[5:end] .== 0x02)
+finalize(S)
 
-@unix_only begin # these give unlink: operation not permitted (EPERM) on Windows
-    rm(fn); rm(fn2); rm(fn3)
-end
+# call gc 3 times to avoid unlink: operation not permitted (EPERM) on Windows
+S = nothing
+@everywhere gc()
+@everywhere gc()
+@everywhere gc()
+rm(fn); rm(fn2); rm(fn3)
 
 ### Utility functions
 
@@ -401,6 +410,15 @@ pids_d = procs(d)
 remotecall_fetch(setindex!, pids_d[findfirst(id->(id != myid()), pids_d)], d, 1.0, 1:10)
 @test ds != d
 @test s != d
+copy!(d, s)
+@everywhere setid!(A) = A[localindexes(A)] = myid()
+@sync for p in procs(ds)
+    @async remotecall_wait(setid!, p, ds)
+end
+@test d == s
+@test ds != s
+@test first(ds) == first(procs(ds))
+@test last(ds)  ==  last(procs(ds))
 
 
 # SharedArray as an array
@@ -464,7 +482,8 @@ finalize(d)
 
 # Test @parallel load balancing - all processors should get either M or M+1
 # iterations out of the loop range for some M.
-workloads = hist(@parallel((a,b)->[a;b], for i=1:7; myid(); end), nprocs())[2]
+ids = @parallel((a,b)->[a;b], for i=1:7; myid(); end)
+workloads = Int[sum(ids .== i) for i in 2:nprocs()]
 @test maximum(workloads) - minimum(workloads) <= 1
 
 # @parallel reduction should work even with very short ranges
@@ -516,7 +535,7 @@ testcpt()
 @test_throws ArgumentError timedwait(()->false, 0.1, pollint=-0.5)
 
 # specify pids for pmap
-@test sort(workers()[1:2]) == sort(unique(pmap(x->(sleep(0.1);myid()), 1:10, pids = workers()[1:2])))
+@test sort(workers()[1:2]) == sort(unique(pmap(WorkerPool(workers()[1:2]), x->(sleep(0.1);myid()), 1:10)))
 
 # Testing buffered  and unbuffered reads
 # This large array should write directly to the socket
@@ -657,9 +676,126 @@ let ex
     @test length(bt) > 1
     frame, repeated = bt[1]::Tuple{StackFrame, Int}
     @test frame.func == :foo
-    @test isnull(frame.outer_linfo)
+    @test isnull(frame.linfo)
     @test repeated == 1
 end
+
+# pmap tests. Needs at least 4 processors dedicated to the below tests. Which we currently have
+# since the parallel tests are now spawned as a separate set.
+function unmangle_exception(e)
+    while any(x->isa(e, x), [CompositeException, RemoteException, CapturedException])
+        if isa(e, CompositeException)
+            e = e.exceptions[1].ex
+        end
+        if isa(e, RemoteException)
+            e = e.captured.ex
+        end
+        if isa(e, CapturedException)
+            e = e.ex
+        end
+    end
+    return e
+end
+
+# Test all combinations of pmap keyword args.
+pmap_args = [
+                (:distributed, [:default, false]),
+                (:batch_size, [:default,2]),
+                (:on_error, [:default, e -> unmangle_exception(e).msg == "foobar"]),
+                (:retry_on, [:default, e -> unmangle_exception(e).msg == "foobar"]),
+                (:retry_n, [:default, typemax(Int)-1]),
+                (:retry_max_delay, [0, 0.001])
+            ]
+
+kwdict = Dict()
+function walk_args(i)
+    if i > length(pmap_args)
+        kwargs = []
+        for (k,v) in kwdict
+            if v !== :default
+                push!(kwargs, (k,v))
+            end
+        end
+
+        data = [1:100...]
+
+        testw = kwdict[:distributed] === false ? [1] : workers()
+
+        if (kwdict[:on_error] === :default) && (kwdict[:retry_n] === :default)
+            mapf = x -> (x*2, myid())
+            results_test = pmap_res -> begin
+                results = [x[1] for x in pmap_res]
+                pids = [x[2] for x in pmap_res]
+                @test results == [2:2:200...]
+                for p in testw
+                    @test p in pids
+                end
+            end
+        elseif kwdict[:retry_n] !== :default
+            mapf = x -> iseven(myid()) ? error("foobar") : (x*2, myid())
+            results_test = pmap_res -> begin
+                results = [x[1] for x in pmap_res]
+                pids = [x[2] for x in pmap_res]
+                @test results == [2:2:200...]
+                for p in testw
+                    if isodd(p)
+                        @test p in pids
+                    else
+                        @test !(p in pids)
+                    end
+                end
+            end
+        else (kwdict[:on_error] !== :default) && (kwdict[:retry_n] === :default)
+            mapf = x -> iseven(x) ? error("foobar") : (x*2, myid())
+            results_test = pmap_res -> begin
+                w = testw
+                for (idx,x) in enumerate(data)
+                    if iseven(x)
+                        @test pmap_res[idx] == true
+                    else
+                        @test pmap_res[idx][1] == x*2
+                        @test pmap_res[idx][2] in w
+                    end
+                end
+            end
+        end
+
+        try
+            results_test(pmap(mapf, data; kwargs...))
+        catch e
+            println("pmap executing with args : ", kwargs)
+            rethrow(e)
+        end
+
+        return
+    end
+
+    kwdict[pmap_args[i][1]] = pmap_args[i][2][1]
+    walk_args(i+1)
+
+    kwdict[pmap_args[i][1]] = pmap_args[i][2][2]
+    walk_args(i+1)
+end
+
+# Start test for various kw arg combinations
+walk_args(1)
+
+# Simple test for pmap throws error
+error_thrown = false
+try
+    pmap(x -> x==50 ? error("foobar") : x, 1:100)
+catch e
+    @test unmangle_exception(e).msg == "foobar"
+    error_thrown = true
+end
+@test error_thrown
+
+# Test pmap with a generator type iterator
+@test [1:100...] == pmap(x->x, Base.Generator(x->(sleep(0.0001); x), 1:100))
+
+# Test asyncmap
+@test allunique(asyncmap(x->object_id(current_task()), 1:100))
+
 
 # The below block of tests are usually run only on local development systems, since:
 # - tests which print errors
@@ -670,34 +806,6 @@ end
 DoFullTest = Bool(parse(Int,(get(ENV, "JULIA_TESTFULL", "0"))))
 
 if DoFullTest
-    # pmap tests
-    # needs at least 4 processors dedicated to the below tests
-    ppids = remotecall_fetch(()->addprocs(4), 1)
-    s = "abcdefghijklmnopqrstuvwxyz";
-    ups = uppercase(s);
-    @test ups == bytestring(UInt8[UInt8(c) for c in pmap(x->uppercase(x), s)])
-    @test ups == bytestring(UInt8[UInt8(c) for c in pmap(x->uppercase(Char(x)), s.data)])
-
-    # retry, on error exit
-    res = pmap(x->(x=='a') ? error("EXPECTED TEST ERROR. TO BE IGNORED.") : (sleep(0.1);uppercase(x)), s; err_retry=true, err_stop=true, pids=ppids);
-    @test (length(res) < length(ups))
-    @test isa(res[1], Exception)
-
-    # no retry, on error exit
-    res = pmap(x->(x=='a') ? error("EXPECTED TEST ERROR. TO BE IGNORED.") : (sleep(0.1);uppercase(x)), s; err_retry=false, err_stop=true, pids=ppids);
-    @test (length(res) < length(ups))
-    @test isa(res[1], Exception)
-
-    # retry, on error continue
-    res = pmap(x->iseven(myid()) ? error("EXPECTED TEST ERROR. TO BE IGNORED.") : (sleep(0.1);uppercase(x)), s; err_retry=true, err_stop=false, pids=ppids);
-    @test length(res) == length(ups)
-    @test ups == bytestring(UInt8[UInt8(c) for c in res])
-
-    # no retry, on error continue
-    res = pmap(x->(x=='a') ? error("EXPECTED TEST ERROR. TO BE IGNORED.") : (sleep(0.1);uppercase(x)), s; err_retry=false, err_stop=false, pids=ppids);
-    @test length(res) == length(ups)
-    @test isa(res[1], Exception)
-
     # Topology tests need to run externally since a given cluster at any
     # time can only support a single topology and the current session
     # is already running in parallel under the default topology.
@@ -719,12 +827,20 @@ if DoFullTest
     end
     sleep(0.5)  # Give some time for the above error to be printed
 
-    # github PR #14456
-    for n = 1:10^6
-        fetch(@spawnat myid() myid())
+    println("\n\nThe following 'invalid connection credentials' error messages are to be ignored.")
+    all_w = workers()
+    # Test sending fake data to workers. The worker processes will print an
+    # error message but should not terminate.
+    for w in Base.PGRP.workers
+        if isa(w, Base.Worker)
+            s = connect(get(w.config.host), get(w.config.port))
+            write(s, randstring(32))
+        end
     end
+    @test workers() == all_w
+    @test all([p == remotecall_fetch(myid, p) for p in all_w])
 
-@unix_only begin
+if is_unix() # aka have ssh
     function test_n_remove_pids(new_pids)
         for p in new_pids
             w_in_remote = sort(remotecall_fetch(workers, p))
@@ -784,9 +900,8 @@ if DoFullTest
     end)
     @test length(new_pids) == num_workers
     test_n_remove_pids(new_pids)
-
-end
-end
+end # unix-only
+end # full-test
 
 # issue #7727
 let A = [], B = []
@@ -842,3 +957,57 @@ v15406 = remotecall_wait(() -> 1, id_other)
 fetch(v15406)
 remotecall_wait(t -> fetch(t), id_other, v15406)
 
+# Test various forms of remotecall* invocations
+
+@everywhere f_args(v1, v2=0; kw1=0, kw2=0) = v1+v2+kw1+kw2
+
+function test_f_args(result, args...; kwargs...)
+    @test fetch(remotecall(args...; kwargs...)) == result
+    @test fetch(remotecall_wait(args...; kwargs...)) == result
+    @test remotecall_fetch(args...; kwargs...) == result
+
+    # A visual test - remote_do should NOT print any errors
+    !isa(args[2], WorkerPool) && Base.remote_do(args...; kwargs...)
+end
+
+for tid in [id_other, id_me, Base.default_worker_pool()]
+    test_f_args(1, f_args, tid, 1)
+    test_f_args(3, f_args, tid, 1, 2)
+    test_f_args(5, f_args, tid, 1; kw1=4)
+    test_f_args(13, f_args, tid, 1; kw1=4, kw2=8)
+    test_f_args(15, f_args, tid, 1, 2; kw1=4, kw2=8)
+end
+
+# github PR #14456
+n = DoFullTest ? 6 : 5
+for i = 1:10^n
+    fetch(@spawnat myid() myid())
+end
+
+# issue #15451
+@test remotecall_fetch(x->(y->2y)(x)+1, workers()[1], 3) == 7
+
+# issue #16451
+rng=RandomDevice()
+retval = @parallel (+) for _ in 1:10
+    rand(rng)
+end
+@test retval > 0.0 && retval < 10.0
+
+rand(rng)
+retval = @parallel (+) for _ in 1:10
+    rand(rng)
+end
+@test retval > 0.0 && retval < 10.0
+
+# serialization tests
+wrkr1 = workers()[1]
+wrkr2 = workers()[end]
+
+@test remotecall_fetch(p->remotecall_fetch(myid, p), wrkr1, wrkr2) == wrkr2
+
+# Send f to wrkr1 and wrkr2. Then try calling f on wrkr2 from wrkr1
+f_myid = ()->myid()
+@test wrkr1 == remotecall_fetch(f_myid, wrkr1)
+@test wrkr2 == remotecall_fetch(f_myid, wrkr2)
+@test wrkr2 == remotecall_fetch((f, p)->remotecall_fetch(f, p), wrkr1, f_myid, wrkr2)

@@ -134,10 +134,11 @@ function decompose(x::BigFloat)
     isinf(x) && return big(x.sign), 0, 0
     x == 0 && return big(0), 0, Int(x.sign)
     s = BigInt()
-    ccall((:__gmpz_realloc2, :libgmp), Void, (Ptr{BigInt}, Culong), &s, x.prec)
-    s.size = -fld(-x.prec,(sizeof(GMP.Limb)<<3))
-    ccall(:memcpy, Ptr{Void}, (Ptr{Void}, Ptr{Void}, Csize_t), s.d, x.d, s.size*sizeof(GMP.Limb))
-    s, Int(x.exp - x.prec), Int(x.sign)
+    s.size = cld(x.prec, 8*sizeof(GMP.Limb)) # limbs
+    b = s.size * sizeof(GMP.Limb)            # bytes
+    ccall((:__gmpz_realloc2, :libgmp), Void, (Ptr{BigInt}, Culong), &s, 8b) # bits
+    ccall(:memcpy, Ptr{Void}, (Ptr{Void}, Ptr{Void}, Csize_t), s.d, x.d, b) # bytes
+    s, Int(x.exp - 8b), Int(x.sign)
 end
 
 ## streamlined hashing for smallish rational types ##
@@ -172,9 +173,9 @@ hash(x::Float16, h::UInt) = hash(Float64(x), h)
 const memhash = UInt === UInt64 ? :memhash_seed : :memhash32_seed
 const memhash_seed = UInt === UInt64 ? 0x71e729fd56419c81 : 0x56419c81
 
-function hash{T<:ByteString}(s::Union{T,SubString{T}}, h::UInt)
+function hash(s::Union{String,SubString{String}}, h::UInt)
     h += memhash_seed
     # note: use pointer(s) here (see #6058).
     ccall(memhash, UInt, (Ptr{UInt8}, Csize_t, UInt32), pointer(s), sizeof(s), h % UInt32) + h
 end
-hash(s::AbstractString, h::UInt) = hash(bytestring(s), h)
+hash(s::AbstractString, h::UInt) = hash(String(s), h)

@@ -24,7 +24,7 @@ for c in child_nodes(root(xdoc))
             id = attribute(ce, "id")
             U = string(map(s -> Char(parse(Int, s, 16)),
                            split(id[2:end], "-"))...)
-            if ismatch(r"^\\[A-Za-z]+$",L) && !isa(U,ASCIIString)
+            if ismatch(r"^\\[A-Za-z]+$",L) && !isa(U,String)
                 if L in Ls
                     println("# duplicated symbol $L ($id)")
                 else
@@ -55,7 +55,7 @@ open(fname) do f
         x = map(s -> rstrip(s, [' ','\t','\n']),
                 split(replace(L, r"[{}\"]+", "\t"), "\t"))
         c = Char(parse(Int, x[2], 16))
-        if (Base.is_id_char(c) || Base.isoperator(symbol(c))) &&
+        if (Base.is_id_char(c) || Base.isoperator(Symbol(c))) &&
            string(c) ∉ latex_strings && !isascii(c)
             tabcomname = escape_string(x[3])
             if startswith(tabcomname, "\\\\math")

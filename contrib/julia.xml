@@ -77,11 +77,11 @@
     <list name="types">
       <item> AbstractArray </item>
       <item> AbstractMatrix </item>
+      <item> AbstractRemoteRef </item>
       <item> AbstractSparseMatrix </item>
       <item> AbstractVector </item>
       <item> Any </item>
       <item> Array </item>
-      <item> ASCIIString </item>
       <item> Associative </item>
       <item> AsyncStream </item>
       <item> Bidiagonal </item>
@@ -91,7 +91,6 @@
       <item> BitMatrix </item>
       <item> BitVector </item>
       <item> Bool </item>
-      <item> ByteString </item>
       <item> Char </item>
       <item> CharString </item>
       <item> Cholesky </item>
@@ -159,11 +158,9 @@
       <item> Regex </item>
       <item> RegexMatch </item>
       <item> RegexMatchIterator </item>
-      <item> RemoteRef </item>
       <item> RepString </item>
       <item> RevString </item>
       <item> Reverse </item>
-      <item> RopeString </item>
       <item> Schur </item>
       <item> Set </item>
       <item> Signed </item>
@@ -182,8 +179,8 @@
       <item> Symbol </item>
       <item> Symmetric </item>
       <item> SymTridiagonal </item>
+      <item> TCPSocket </item>
       <item> Task </item>
-      <item> TcpSocket </item>
       <item> TimeoutAsyncWork </item>
       <item> TmStruct </item>
       <item> Triangular </item>
@@ -198,7 +195,6 @@
       <item> UInt128 </item>
       <item> Union </item>
       <item> Unsigned </item>
-      <item> UTF8String </item>
       <item> UVError </item>
       <item> VecOrMat </item>
       <item> Vector </item>
@@ -284,7 +280,6 @@
       <item> C_NULL </item>
       <item> CPU_CORES </item>
       <item> DL_LOAD_PATH </item>
-      <item> OS_NAME </item>
       <item> ENDIAN_BOM </item>
       <item> ENV </item>
       <item> Inf </item>

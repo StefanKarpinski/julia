@@ -48,7 +48,7 @@ developers may find the notes in [CONTRIBUTING](https://github.com/JuliaLang/jul
 <a name="Currently-Supported-Platforms"/>
 ## Currently Supported Platforms
 
-- **GNU/Linux**
+- **Linux**
 - **Darwin/OS X**
 - **FreeBSD**
 - **Windows**
@@ -72,7 +72,7 @@ By default you will be building the latest unstable version of Julia. However, m
 
     git checkout release-0.4
 
-Now run `make` to build the `julia` executable. To perform a parallel build, use `make -j N` and supply the maximum number of concurrent processes.
+Now run `make` to build the `julia` executable. To perform a parallel build, use `make -j N` and supply the maximum number of concurrent processes. (See [Platform Specific Build Notes](https://github.com/JuliaLang/julia#platform-specific-build-notes) for details.)
 When compiled the first time, it will automatically download and build its [external dependencies](#Required-Build-Tools-External-Libraries).
 This takes a while, but only has to be done once. If the defaults in the build do not work for you, and you need to set specific make parameters, you can save them in `Make.user`. The build will automatically check for the existence of `Make.user` and use it if it exists.
 Building Julia requires 1.5GiB of disk space and approximately 700MiB of virtual memory.
@@ -395,6 +395,7 @@ You can read about [getting started](http://julialang.org/manual/getting-started
 
 The following distributions include julia, but the versions may be out of date due to rapid development:
 
+* [Alpine Linux](http://pkgs.alpinelinux.org/package/edge/testing/x86_64/julia)
 * [Arch Linux](https://www.archlinux.org/packages/community/i686/julia/)
 * [Debian GNU/Linux](http://packages.debian.org/sid/julia)
 * [Fedora Linux](https://admin.fedoraproject.org/pkgdb/package/julia/), RHEL/CentOS/OEL/Scientific Linux (EPEL)
@@ -415,13 +416,20 @@ The following distributions include julia, but the versions may be out of date d
 <a name="Editor-Terminal-Setup"/>
 ## Editor and Terminal Setup
 
-Currently, Julia editing mode support is available for Emacs, Vim, Textmate,
-Sublime Text, Notepad++, and Kate, in `contrib/`. There is early support for
-IDEs such as [Juno](http://junolab.org/),
-[Eclipse (LiClipse)](http://brainwy.github.io/liclipse/). A notebook interface
-is available through [IJulia](https://github.com/JuliaLang/IJulia.jl), which
-adds Julia support to [Jupyter](http://jupyter.org/)/[IPython](http://ipython.org). The
-[Sublime-IJulia](https://github.com/quinnj/Sublime-IJulia) plugin enables
-interaction between IJulia and Sublime Text.
+Currently, Julia editing mode support is available for a number of
+editors. While Julia modes for
+[Emacs](https://github.com/JuliaLang/julia-emacs) and
+[Vim](https://github.com/JuliaLang/julia-vim) have their own repos,
+others such as Textmate, Sublime Text, Notepad++, and Kate, are in
+`contrib/`.
+
+Two major IDEs are supported for Julia: [Juno](http://junolab.org/),
+which is based on [Atom](https://atom.io/), and
+[JuliaDT](https://github.com/JuliaComputing/JuliaDT), which is an
+[Eclipse](http://eclipse.org) plugin. A [Jupyter](http://jupyter.org/) notebooks interface
+is available through
+[IJulia](https://github.com/JuliaLang/IJulia.jl). The
+[Sublime-IJulia](https://github.com/quinnj/Sublime-IJulia) plugin
+enables interaction between IJulia and Sublime Text.
 
 In the terminal, Julia makes great use of both control-key and meta-key bindings. To make the meta-key bindings more accessible, many terminal emulator programs (e.g., `Terminal`, `iTerm`, `xterm`, etc.) allow you to use the alt or option key as meta.  See the section in the manual on [interacting with Julia](http://docs.julialang.org/en/latest/manual/interacting-with-julia/) for more details.

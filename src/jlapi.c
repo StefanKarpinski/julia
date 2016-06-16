@@ -52,7 +52,9 @@ JL_DLLEXPORT jl_value_t *jl_eval_string(const char *str)
 {
     jl_value_t *r;
     JL_TRY {
-        jl_value_t *ast = jl_parse_input_line(str, strlen(str));
+        char *filename = "none";
+        jl_value_t *ast = jl_parse_input_line(str, strlen(str),
+                filename, strlen(filename));
         JL_GC_PUSH1(&ast);
         r = jl_toplevel_eval(ast);
         JL_GC_POP();
@@ -105,7 +107,7 @@ JL_DLLEXPORT size_t jl_array_size(jl_value_t *a, int d)
     return jl_array_dim(a, d);
 }
 
-JL_DLLEXPORT const char *jl_bytestring_ptr(jl_value_t *s)
+JL_DLLEXPORT const char *jl_string_ptr(jl_value_t *s)
 {
     return jl_string_data(s);
 }
@@ -227,7 +229,7 @@ JL_DLLEXPORT void jl_sigatomic_begin(void)
 
 JL_DLLEXPORT void jl_sigatomic_end(void)
 {
-    if (jl_defer_signal == 0)
+    if (jl_get_ptls_states()->defer_signal == 0)
         jl_error("sigatomic_end called in non-sigatomic region");
     JL_SIGATOMIC_END();
 }
@@ -281,14 +283,14 @@ JL_DLLEXPORT const char *jl_ver_string(void)
    return JULIA_VERSION_STRING;
 }
 
-// return char* from ByteString field in Base.GIT_VERSION_INFO
+// return char* from String field in Base.GIT_VERSION_INFO
 static const char *git_info_string(const char *fld)
 {
     static jl_value_t *GIT_VERSION_INFO = NULL;
     if (!GIT_VERSION_INFO)
         GIT_VERSION_INFO = jl_get_global(jl_base_module, jl_symbol("GIT_VERSION_INFO"));
     jl_value_t *f = jl_get_field(GIT_VERSION_INFO, fld);
-    assert(jl_is_byte_string(f));
+    assert(jl_is_string(f));
     return jl_string_data(f);
 }
 
@@ -342,6 +344,11 @@ JL_DLLEXPORT void (jl_gc_safe_leave)(int8_t state)
     jl_gc_safe_leave(state);
 }
 
+JL_DLLEXPORT void (jl_gc_safepoint)(void)
+{
+    jl_gc_safepoint();
+}
+
 JL_DLLEXPORT void (jl_cpu_pause)(void)
 {
     jl_cpu_pause();
@@ -351,36 +358,6 @@ JL_DLLEXPORT void (jl_cpu_wake)(void)
 {
     jl_cpu_wake();
 }
-
-#ifndef _OS_WINDOWS_
-#  define UNW_LOCAL_ONLY
-#  include <libunwind.h>
-#define STRINGIFY1(x) #x
-#define STRINGIFY2(x) STRINGIFY1(x)
-#if defined(_OS_LINUX_)
-#if defined(_CPU_X86_64_)
-asm("_jl_unw_getcontext: movq " STRINGIFY2(unw_tdep_getcontext) "@GOTPCREL(%rip), %rax\n"
-    "jmpq *%rax");
-#elif defined(_CPU_X86_)
-asm("_jl_unw_getcontext: jmp " STRINGIFY2(unw_tdep_getcontext) "@PLT");
-#endif
-#endif
-
-JL_DLLEXPORT void jl_unw_init_local(void *cursor, void *context)
-{
-    unw_init_local((unw_cursor_t *)cursor, (unw_context_t *)context);
-}
-
-JL_DLLEXPORT int jl_unw_step(void *cursor)
-{
-    return unw_step((unw_cursor_t *)cursor);
-}
-
-JL_DLLEXPORT int jl_unw_get_reg(void *cursor, int reg, uintptr_t *retval)
-{
-    return unw_get_reg((unw_cursor_t *)cursor, reg, retval);
-}
-#endif
 
 #ifdef __cplusplus
 }

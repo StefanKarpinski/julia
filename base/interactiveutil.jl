@@ -10,7 +10,7 @@ for use within backticks. You can change the editor by setting JULIA_EDITOR, VIS
 EDITOR as an environmental variable.
 """
 function editor()
-    if OS_NAME == :Windows || OS_NAME == :Darwin
+    if is_windows() || is_apple()
         default_editor = "open"
     elseif isfile("/etc/alternatives/editor")
         default_editor = "/etc/alternatives/editor"
@@ -42,10 +42,10 @@ function edit(path::AbstractString, line::Integer=0)
         cmd = line != 0 ? `$command $path -l $line` : `$command $path`
     elseif startswith(name, "subl") || name == "atom"
         cmd = line != 0 ? `$command $path:$line` : `$command $path`
-    elseif OS_NAME == :Windows && (name == "start" || name == "open")
+    elseif is_windows() && (name == "start" || name == "open")
         cmd = `cmd /c start /b $path`
         line_unsupported = true
-    elseif OS_NAME == :Darwin && (name == "start" || name == "open")
+    elseif is_apple() && (name == "start" || name == "open")
         cmd = `open -t $path`
         line_unsupported = true
     else
@@ -62,11 +62,6 @@ function edit(path::AbstractString, line::Integer=0)
     line != 0 && line_unsupported && println("Unknown editor: no line number information passed.\nThe method is defined at line $line.")
 
     nothing
-end
-
-function edit(m::Method)
-    tv, decls, file, line = arg_decl_parts(m)
-    edit(string(file), line)
 end
 
 edit(f)          = edit(functionloc(f)...)
@@ -87,16 +82,15 @@ less(file, line::Integer) = error("could not find source file for function")
 
 # clipboard copy and paste
 
-@osx_only begin
+if is_apple()
     function clipboard(x)
         open(pipeline(`pbcopy`, stderr=STDERR), "w") do io
             print(io, x)
         end
     end
     clipboard() = readstring(`pbpaste`)
-end
 
-@linux_only begin
+elseif is_linux()
     _clipboardcmd = nothing
     function clipboardcmd()
         global _clipboardcmd
@@ -109,7 +103,7 @@ end
     function clipboard(x)
         c = clipboardcmd()
         cmd = c == :xsel  ? `xsel --nodetach --input --clipboard` :
-              c == :xclip ? `xclip -quiet -in -selection clipboard` :
+              c == :xclip ? `xclip -silent -in -selection clipboard` :
             error("unexpected clipboard command: $c")
         open(pipeline(cmd, stderr=STDERR), "w") do io
             print(io, x)
@@ -122,9 +116,9 @@ end
             error("unexpected clipboard command: $c")
         readstring(pipeline(cmd, stderr=STDERR))
     end
-end
 
-@windows_only begin # TODO: these functions leak memory and memory locks if they throw an error
+elseif is_windows()
+    # TODO: these functions leak memory and memory locks if they throw an error
     function clipboard(x::AbstractString)
         if containsnul(x)
             throw(ArgumentError("Windows clipboard strings cannot contain NUL character"))
@@ -143,7 +137,7 @@ end
         systemerror(:SetClipboardData, pdata!=p)
         ccall((:CloseClipboard, "user32"), stdcall, Void, ())
     end
-    clipboard(x) = clipboard(sprint(io->print(io,x))::ByteString)
+    clipboard(x) = clipboard(sprint(io->print(io,x))::String)
 
     function clipboard()
         systemerror(:OpenClipboard, 0==ccall((:OpenClipboard, "user32"), stdcall, Cint, (Ptr{Void},), C_NULL))
@@ -155,18 +149,43 @@ end
         # find NUL terminator (0x0000 16-bit code unit)
         len = 0
         while unsafe_load(plock, len+1) != 0; len += 1; end
-        # get Vector{UInt16}, transcode data to UTF-8, make a ByteString of it
-        s = bytestring(utf16to8(pointer_to_array(plock, len)))
+        # get Vector{UInt16}, transcode data to UTF-8, make a String of it
+        s = String(transcode(UInt8, unsafe_wrap(Array, plock, len)))
         systemerror(:GlobalUnlock, 0==ccall((:GlobalUnlock, "kernel32"), stdcall, Cint, (Ptr{UInt16},), plock))
         return s
     end
-end
 
-if !isdefined(:clipboard)
-    clipboard(x="") = error("clipboard functionality not implemented for $OS_NAME")
+else
+    clipboard(x="") = error("`clipboard` function not implemented for $(Sys.KERNEL)")
 end
 
 # system information
+
+# used by sysinfo.jl
+function _show_cpuinfo(io::IO, info::Sys.CPUinfo, header::Bool=true, prefix::AbstractString="    ")
+    tck = Sys.SC_CLK_TCK
+    if header
+        println(io, info.model, ": ")
+        print(io, " "^length(prefix))
+        if tck > 0
+            @printf(io, "    %5s    %9s    %9s    %9s    %9s    %9s\n",
+                    "speed", "user", "nice", "sys", "idle", "irq")
+        else
+            @printf(io, "    %5s    %9s  %9s  %9s  %9s  %9s ticks\n",
+                    "speed", "user", "nice", "sys", "idle", "irq")
+        end
+    end
+    print(io, prefix)
+    if tck > 0
+        @printf(io, "%5d MHz  %9d s  %9d s  %9d s  %9d s  %9d s",
+                info.speed, info.cpu_times!user / tck, info.cpu_times!nice / tck,
+                info.cpu_times!sys / tck, info.cpu_times!idle / tck, info.cpu_times!irq / tck)
+    else
+        @printf(io, "%5d MHz  %9d  %9d  %9d  %9d  %9d ticks",
+                info.speed, info.cpu_times!user, info.cpu_times!nice,
+                info.cpu_times!sys, info.cpu_times!idle, info.cpu_times!irq)
+    end
+end
 
 function versioninfo(io::IO=STDOUT, verbose::Bool=false)
     println(io,             "Julia Version $VERSION")
@@ -177,19 +196,25 @@ function versioninfo(io::IO=STDOUT, verbose::Bool=false)
         println(io, "DEBUG build")
     end
     println(io,             "Platform Info:")
-    println(io,             "  System: ", Sys.OS_NAME, " (", Sys.MACHINE, ")")
+    println(io,             "  System: ", Sys.KERNEL, " (", Sys.MACHINE, ")")
 
     cpu = Sys.cpu_info()
     println(io,         "  CPU: ", cpu[1].model)
     println(io,             "  WORD_SIZE: ", Sys.WORD_SIZE)
     if verbose
         lsb = ""
-        @linux_only try lsb = readchomp(pipeline(`lsb_release -ds`, stderr=DevNull)) end
-        @windows_only try lsb = strip(readstring(`$(ENV["COMSPEC"]) /c ver`)) end
+        if is_linux()
+            try lsb = readchomp(pipeline(`lsb_release -ds`, stderr=DevNull)) end
+        end
+        if is_windows()
+            try lsb = strip(readstring(`$(ENV["COMSPEC"]) /c ver`)) end
+        end
         if lsb != ""
             println(io,     "           ", lsb)
         end
-        @unix_only println(io,         "  uname: ",readchomp(`uname -mprsv`))
+        if is_unix()
+            println(io,         "  uname: ", readchomp(`uname -mprsv`))
+        end
         println(io,         "Memory: $(Sys.total_memory()/2^30) GB ($(Sys.free_memory()/2^20) MB free)")
         try println(io,     "Uptime: $(Sys.uptime()) sec") end
         print(io,           "Load Avg: ")
@@ -198,8 +223,8 @@ function versioninfo(io::IO=STDOUT, verbose::Bool=false)
         Sys.cpu_summary(io)
         println(io          )
     end
-    if Base.libblas_name == "libopenblas" || blas_vendor() == :openblas || blas_vendor() == :openblas64
-        openblas_config = openblas_get_config()
+    if Base.libblas_name == "libopenblas" || BLAS.vendor() == :openblas || BLAS.vendor() == :openblas64
+        openblas_config = BLAS.openblas_get_config()
         println(io,         "  BLAS: libopenblas (", openblas_config, ")")
     else
         println(io,         "  BLAS: ",libblas_name)
@@ -210,7 +235,7 @@ function versioninfo(io::IO=STDOUT, verbose::Bool=false)
     if verbose
         println(io,         "Environment:")
         for (k,v) in ENV
-            if !is(match(r"JULIA|PATH|FLAG|^TERM$|HOME", bytestring(k)), nothing)
+            if !is(match(r"JULIA|PATH|FLAG|^TERM$|HOME", String(k)), nothing)
                 println(io, "  $(k) = $(v)")
             end
         end
@@ -227,8 +252,9 @@ function code_warntype(io::IO, f, t::ANY)
     emph_io = IOContext(io, :TYPEEMPHASIZE => true)
     for li in code_typed(f, t)
         println(emph_io, "Variables:")
-        for i = 1:length(li.slotnames)
-            print(emph_io, "  ", li.slotnames[i])
+        slotnames = lambdainfo_slotnames(li)
+        for i = 1:length(slotnames)
+            print(emph_io, "  ", slotnames[i])
             if isa(li.slottypes,Array)
                 show_expr_type(emph_io, li.slottypes[i], true)
             end
@@ -237,7 +263,10 @@ function code_warntype(io::IO, f, t::ANY)
         print(emph_io, "\nBody:\n  ")
         body = Expr(:body); body.args = uncompressed_ast(li)
         body.typ = li.rettype
-        show_unquoted(emph_io, body, 2)
+        # Fix slot names and types in function body
+        show_unquoted(IOContext(IOContext(emph_io, :LAMBDAINFO => li),
+                                          :LAMBDA_SLOTNAMES => slotnames),
+                      body, 2)
         print(emph_io, '\n')
     end
     nothing
@@ -256,12 +285,17 @@ function gen_call_with_extracted_types(fcn, ex0)
                     Expr(:call, typesof, map(esc, args[2:end])...))
     end
     exret = Expr(:none)
+    is_macro = false
     ex = expand(ex0)
-    if !isa(ex, Expr)
+    if isa(ex0, Expr) && ex0.head == :macrocall # Make @edit @time 1+2 edit the macro
+        is_macro = true
+        exret = Expr(:call, fcn,  esc(ex0.args[1]), typesof(ex0.args[2:end]...))
+    elseif !isa(ex, Expr)
         exret = Expr(:call, :error, "expression is not a function call or symbol")
     elseif ex.head == :call
         if any(e->(isa(e, Expr) && e.head==:(...)), ex0.args) &&
-            isa(ex.args[1], TopNode) && ex.args[1].name == :_apply
+            (ex.args[1] === GlobalRef(Core,:_apply) ||
+             ex.args[1] === GlobalRef(Base,:_apply))
             # check for splatting
             exret = Expr(:call, ex.args[1], fcn,
                         Expr(:tuple, esc(ex.args[2]),
@@ -280,7 +314,7 @@ function gen_call_with_extracted_types(fcn, ex0)
             end
         end
     end
-    if ex.head == :thunk || exret.head == :none
+    if (!is_macro && ex.head == :thunk) || exret.head == :none
         exret = Expr(:call, :error, "expression is not a function call, "
                                   * "or is too complex for @$fcn to analyze; "
                                   * "break it down to simpler parts if possible")
@@ -288,7 +322,7 @@ function gen_call_with_extracted_types(fcn, ex0)
     exret
 end
 
-for fname in [:which, :less, :edit, :code_typed, :code_warntype,
+for fname in [:which, :less, :edit, :functionloc, :code_typed, :code_warntype,
               :code_lowered, :code_llvm, :code_llvm_raw, :code_native]
     @eval begin
         macro ($fname)(ex0)
@@ -297,7 +331,80 @@ for fname in [:which, :less, :edit, :code_typed, :code_warntype,
     end
 end
 
-# `methodswith` -- shows a list of methods using the type given
+"""
+    @which
+
+Applied to a function or macro call, it evaluates the arguments to the specified call, and
+returns the `Method` object for the method that would be called for those arguments. Applied
+to a variable, it returns the module in which the variable was bound. It calls out to the
+`which` function.
+"""
+:@which
+
+"""
+    @less
+
+Evaluates the arguments to the function or macro call, determines their types, and calls the `less`
+function on the resulting expression.
+"""
+:@less
+
+"""
+    @edit
+
+Evaluates the arguments to the function or macro call, determines their types, and calls the `edit`
+function on the resulting expression.
+"""
+:@edit
+
+"""
+    @functionloc
+
+Applied to a function or macro call, it evaluates the arguments to the specified call, and
+returns a tuple `(filename,line)` giving the location for the method that would be called for those arguments.
+It calls out to the `functionloc` function.
+"""
+:@functionloc
+
+"""
+    @code_typed
+
+Evaluates the arguments to the function or macro call, determines their types, and calls
+[`code_typed`](:func:`code_typed`) on the resulting expression.
+"""
+:@code_typed
+
+"""
+    @code_warntype
+
+Evaluates the arguments to the function or macro call, determines their types, and calls
+[`code_warntype`](:func:`code_warntype`) on the resulting expression.
+"""
+:@code_warntype
+
+"""
+    @code_lowered
+
+Evaluates the arguments to the function or macro call, determines their types, and calls
+[`code_lowered`](:func:`code_lowered`) on the resulting expression.
+"""
+:@code_lowered
+
+"""
+    @code_llvm
+
+Evaluates the arguments to the function or macro call, determines their types, and calls
+[`code_llvm`](:func:`code_llvm`) on the resulting expression.
+"""
+:@code_llvm
+
+"""
+    @code_native
+
+Evaluates the arguments to the function or macro call, determines their types, and calls
+[`code_native`](:func:`code_native`) on the resulting expression.
+"""
+:@code_native
 
 function type_close_enough(x::ANY, t::ANY)
     x == t && return true
@@ -306,10 +413,9 @@ function type_close_enough(x::ANY, t::ANY)
            (isa(x,Union) && isa(t,DataType) && any(u -> is(u,t), x.types))
 end
 
+# `methodswith` -- shows a list of methods using the type given
 function methodswith(t::Type, f::Function, showparents::Bool=false, meths = Method[])
-    mt = typeof(f).name.mt
-    d = mt.defs
-    while d !== nothing
+    for d in methods(f)
         if any(x -> (type_close_enough(x, t) ||
                      (showparents ? (t <: x && (!isa(x,TypeVar) || x.ub != Any)) :
                       (isa(x,TypeVar) && x.ub != Any && t == x.ub)) &&
@@ -317,7 +423,6 @@ function methodswith(t::Type, f::Function, showparents::Bool=false, meths = Meth
                d.sig.parameters)
             push!(meths, d)
         end
-        d = d.next
     end
     return meths
 end
@@ -353,37 +458,38 @@ end
 # file downloading
 
 downloadcmd = nothing
-@unix_only function download(url::AbstractString, filename::AbstractString)
-    global downloadcmd
-    if downloadcmd === nothing
-        for checkcmd in (:curl, :wget, :fetch)
-            if success(pipeline(`which $checkcmd`, DevNull))
-                downloadcmd = checkcmd
-                break
+if is_windows()
+    function download(url::AbstractString, filename::AbstractString)
+        res = ccall((:URLDownloadToFileW,:urlmon),stdcall,Cuint,
+                    (Ptr{Void},Cwstring,Cwstring,Cuint,Ptr{Void}),C_NULL,url,filename,0,C_NULL)
+        if res != 0
+            error("automatic download failed (error: $res): $url")
+        end
+        filename
+    end
+else
+    function download(url::AbstractString, filename::AbstractString)
+        global downloadcmd
+        if downloadcmd === nothing
+            for checkcmd in (:curl, :wget, :fetch)
+                if success(pipeline(`which $checkcmd`, DevNull))
+                    downloadcmd = checkcmd
+                    break
+                end
             end
         end
+        if downloadcmd == :wget
+            run(`wget -O $filename $url`)
+        elseif downloadcmd == :curl
+            run(`curl -o $filename -L $url`)
+        elseif downloadcmd == :fetch
+            run(`fetch -f $filename $url`)
+        else
+            error("no download agent available; install curl, wget, or fetch")
+        end
+        filename
     end
-    if downloadcmd == :wget
-        run(`wget -O $filename $url`)
-    elseif downloadcmd == :curl
-        run(`curl -o $filename -L $url`)
-    elseif downloadcmd == :fetch
-        run(`fetch -f $filename $url`)
-    else
-        error("no download agent available; install curl, wget, or fetch")
-    end
-    filename
 end
-
-@windows_only function download(url::AbstractString, filename::AbstractString)
-    res = ccall((:URLDownloadToFileW,:urlmon),stdcall,Cuint,
-                (Ptr{Void},Cwstring,Cwstring,Cuint,Ptr{Void}),C_NULL,url,filename,0,C_NULL)
-    if res != 0
-        error("automatic download failed (error: $res): $url")
-    end
-    filename
-end
-
 function download(url::AbstractString)
     filename = tempname()
     download(url, filename)
@@ -407,7 +513,7 @@ end
 
 # testing
 
-function runtests(tests = ["all"], numcores = ceil(Int,CPU_CORES/2))
+function runtests(tests = ["all"], numcores = ceil(Int, Sys.CPU_CORES / 2))
     if isa(tests,AbstractString)
         tests = split(tests)
     end
@@ -493,7 +599,7 @@ summarysize(obj::Symbol, seen, excl) = 0
 function summarysize(obj::DataType, seen, excl)
     key = pointer_from_objref(obj)
     haskey(seen, key) ? (return 0) : (seen[key] = true)
-    size = 7*sizeof(Int) + 6*sizeof(Int32) + 4*nfields(obj) + ifelse(WORD_SIZE==64,4,0)
+    size = 7*sizeof(Int) + 6*sizeof(Int32) + 4*nfields(obj) + ifelse(Sys.WORD_SIZE == 64, 4, 0)
     size += summarysize(obj.parameters, seen, excl)::Int
     size += summarysize(obj.types, seen, excl)::Int
     return size
@@ -514,7 +620,7 @@ function _summarysize(obj::ANY, seen, excl)
     ft = typeof(obj).types
     for i in 1:nfields(obj)
         if !isbits(ft[i]) && isdefined(obj,i)
-            val = obj.(i)
+            val = getfield(obj, i)
             if !isa(val,excl)
                 size += summarysize(val, seen, excl)::Int
             end
@@ -597,17 +703,15 @@ function summarysize(obj::MethodTable, seen, excl)
     size::Int = Core.sizeof(obj)
     size += summarysize(obj.defs, seen, excl)::Int
     size += summarysize(obj.cache, seen, excl)::Int
-    size += summarysize(obj.cache_arg1, seen, excl)::Int
-    size += summarysize(obj.cache_targ, seen, excl)::Int
     if isdefined(obj, :kwsorter)
         size += summarysize(obj.kwsorter, seen, excl)::Int
     end
     return size
 end
 
-function summarysize(m::Method, seen, excl)
+function summarysize(m::TypeMapEntry, seen, excl)
     size::Int = 0
-    while true
+    while true # specialized to prevent stack overflow while following this linked list
         haskey(seen, m) ? (return size) : (seen[m] = true)
         size += Core.sizeof(m)
         if isdefined(m, :func)
@@ -615,9 +719,8 @@ function summarysize(m::Method, seen, excl)
         end
         size += summarysize(m.sig, seen, excl)::Int
         size += summarysize(m.tvars, seen, excl)::Int
-        size += summarysize(m.invokes, seen, excl)::Int
         m.next === nothing && break
-        m = m.next::Method
+        m = m.next::TypeMapEntry
     end
     return size
 end

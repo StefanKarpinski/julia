@@ -8,7 +8,7 @@ export @simd, simd_outer_range, simd_inner_length, simd_index
 
 # Error thrown from ill-formed uses of @simd
 type SimdError <: Exception
-    msg::ASCIIString
+    msg::String
 end
 
 # Parse iteration space expression
@@ -25,7 +25,7 @@ end
 function check_body!(x::Expr)
     if x.head === :break || x.head == :continue
         throw(SimdError("$(x.head) is not allowed inside a @simd loop body"))
-    elseif x.head === :macrocall && x.args[1] === symbol("@goto")
+    elseif x.head === :macrocall && x.args[1] === Symbol("@goto")
         throw(SimdError("$(x.args[1]) is not allowed inside a @simd loop body"))
     end
     for arg in x.args

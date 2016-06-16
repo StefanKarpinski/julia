@@ -1,18 +1,18 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
-replstr(x) = sprint((io,x) -> writemime(io,MIME("text/plain"),x), x)
+replstr(x) = sprint((io,x) -> show(IOContext(io, multiline=true, limit=true), MIME("text/plain"), x), x)
 
-@test replstr(cell(2)) == "2-element Array{Any,1}:\n #undef\n #undef"
-@test replstr(cell(2,2)) == "2x2 Array{Any,2}:\n #undef  #undef\n #undef  #undef"
-@test replstr(cell(2,2,2)) == "2x2x2 Array{Any,3}:\n[:, :, 1] =\n #undef  #undef\n #undef  #undef\n\n[:, :, 2] =\n #undef  #undef\n #undef  #undef"
+@test replstr(Array{Any}(2)) == "2-element Array{Any,1}:\n #undef\n #undef"
+@test replstr(Array{Any}(2,2)) == "2×2 Array{Any,2}:\n #undef  #undef\n #undef  #undef"
+@test replstr(Array{Any}(2,2,2)) == "2×2×2 Array{Any,3}:\n[:, :, 1] =\n #undef  #undef\n #undef  #undef\n\n[:, :, 2] =\n #undef  #undef\n #undef  #undef"
 
 immutable T5589
-    names::Vector{UTF8String}
+    names::Vector{String}
 end
-@test replstr(T5589(Array(UTF8String,100))) == "T5589(UTF8String[#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef  …  #undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef])"
+@test replstr(T5589(Array(String,100))) == "T5589(String[#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef  …  #undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef,#undef])"
 
-@test replstr(parse("type X end")) == ":(type X\n    end)"
-@test replstr(parse("immutable X end")) == ":(immutable X\n    end)"
+@test replstr(parse("type X end")) == ":(type X # none, line 1:\n    end)"
+@test replstr(parse("immutable X end")) == ":(immutable X # none, line 1:\n    end)"
 s = "ccall(:f,Int,(Ptr{Void},),&x)"
 @test replstr(parse(s)) == ":($s)"
 
@@ -163,8 +163,8 @@ end"""
 
 # issue #7188
 @test sprint(show, :foo) == ":foo"
-@test sprint(show, symbol("foo bar")) == "symbol(\"foo bar\")"
-@test sprint(show, symbol("foo \"bar")) == "symbol(\"foo \\\"bar\")"
+@test sprint(show, Symbol("foo bar")) == "Symbol(\"foo bar\")"
+@test sprint(show, Symbol("foo \"bar")) == "Symbol(\"foo \\\"bar\")"
 @test sprint(show, :+) == ":+"
 @test sprint(show, :end) == ":end"
 
@@ -275,13 +275,45 @@ end
 @test repr(:(bitstype A B)) == ":(bitstype A B)"
 @test repr(:(bitstype 100 B)) == ":(bitstype 100 B)"
 
-oldout = STDOUT
-try
-    rd, wr = redirect_stdout()
-    @test dump(STDERR) == nothing
-    @test xdump(STDERR) == nothing
-finally
-    redirect_stdout(oldout)
+let oldout = STDOUT, olderr = STDERR
+    local rdout, wrout, rderr, wrerr, out, err, rd, wr
+    try
+        rd, wr = redirect_stdout()
+        @test dump(STDERR) == nothing
+
+        # pr 16917
+        rdout, wrout = redirect_stdout()
+        @test wrout === STDOUT
+        out = @async readstring(rdout)
+        rderr, wrerr = redirect_stderr()
+        @test wrerr === STDERR
+        err = @async readstring(rderr)
+        if !is_windows()
+            close(wrout)
+            close(wrerr)
+        end
+        for io in (Core.STDOUT, Core.STDERR)
+            Core.println(io, "TESTA")
+            println(io, "TESTB")
+            print(io, 'Α', 1)
+            Core.print(io, 'Β', 2)
+            Core.show(io, "A")
+            println(io)
+        end
+        Core.println("A")
+        Core.print("1", 2, 3.0)
+        Core.show("C")
+        Core.println()
+        redirect_stdout(oldout)
+        redirect_stderr(olderr)
+        close(wrout)
+        close(wrerr)
+        @test wait(out) == "TESTA\nTESTB\nΑ1Β2\"A\"\nA\n123\"C\"\n"
+        @test wait(err) == "TESTA\nTESTB\nΑ1Β2\"A\"\n"
+    finally
+        redirect_stdout(oldout)
+        redirect_stderr(olderr)
+    end
 end
 
 # issue #12960
@@ -317,37 +349,37 @@ end
 @test Base.inbase(LinAlg)
 @test !Base.inbase(Core)
 
-let repr = sprint(io -> writemime(io,"text/plain", methods(Base.inbase)))
+let repr = sprint(io -> show(io,"text/plain", methods(Base.inbase)))
     @test contains(repr, "inbase(m::Module)")
 end
-let repr = sprint(io -> writemime(io,"text/html", methods(Base.inbase)))
+let repr = sprint(io -> show(io,"text/html", methods(Base.inbase)))
     @test contains(repr, "inbase(m::<b>Module</b>)")
 end
 
 f5971(x, y...; z=1, w...) = nothing
-let repr = sprint(io -> writemime(io,"text/plain", methods(f5971)))
+let repr = sprint(io -> show(io,"text/plain", methods(f5971)))
     @test contains(repr, "f5971(x, y...; z)")
 end
-let repr = sprint(io -> writemime(io,"text/html", methods(f5971)))
+let repr = sprint(io -> show(io,"text/html", methods(f5971)))
     @test contains(repr, "f5971(x, y...; <i>z</i>)")
 end
 
 if isempty(Base.GIT_VERSION_INFO.commit)
-    @test contains(Base.url(methods(eigs).defs),"https://github.com/JuliaLang/julia/tree/v$VERSION/base/linalg/arnoldi.jl#L")
+    @test contains(Base.url(first(methods(eigs))),"https://github.com/JuliaLang/julia/tree/v$VERSION/base/linalg/arnoldi.jl#L")
 else
-    @test contains(Base.url(methods(eigs).defs),"https://github.com/JuliaLang/julia/tree/$(Base.GIT_VERSION_INFO.commit)/base/linalg/arnoldi.jl#L")
+    @test contains(Base.url(first(methods(eigs))),"https://github.com/JuliaLang/julia/tree/$(Base.GIT_VERSION_INFO.commit)/base/linalg/arnoldi.jl#L")
 end
 
 # print_matrix should be able to handle small and large objects easily, test by
-# calling writemime. This also indirectly tests print_matrix_row, which
+# calling show. This also indirectly tests print_matrix_row, which
 # is used repeatedly by print_matrix.
 # This fits on screen:
-@test replstr(eye(10)) == "10x10 Array{Float64,2}:\n 1.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  1.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  1.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  1.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  1.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  1.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  1.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  0.0  1.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  1.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  1.0"
+@test replstr(eye(10)) == "10×10 Array{Float64,2}:\n 1.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  1.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  1.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  1.0  0.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  1.0  0.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  1.0  0.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  1.0  0.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  0.0  1.0  0.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  1.0  0.0\n 0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  1.0"
 # an array too long vertically to fit on screen, and too long horizontally:
 @test replstr(collect(1.:100.)) == "100-element Array{Float64,1}:\n   1.0\n   2.0\n   3.0\n   4.0\n   5.0\n   6.0\n   7.0\n   8.0\n   9.0\n  10.0\n   ⋮  \n  92.0\n  93.0\n  94.0\n  95.0\n  96.0\n  97.0\n  98.0\n  99.0\n 100.0"
-@test replstr(collect(1.:100.)') == "1x100 Array{Float64,2}:\n 1.0  2.0  3.0  4.0  5.0  6.0  7.0  …  95.0  96.0  97.0  98.0  99.0  100.0"
+@test replstr(collect(1.:100.)') == "1×100 Array{Float64,2}:\n 1.0  2.0  3.0  4.0  5.0  6.0  7.0  …  95.0  96.0  97.0  98.0  99.0  100.0"
 # too big in both directions to fit on screen:
-@test replstr((1.:100.)*(1:100)') == "100x100 Array{Float64,2}:\n   1.0    2.0    3.0    4.0    5.0    6.0  …    97.0    98.0    99.0    100.0\n   2.0    4.0    6.0    8.0   10.0   12.0      194.0   196.0   198.0    200.0\n   3.0    6.0    9.0   12.0   15.0   18.0      291.0   294.0   297.0    300.0\n   4.0    8.0   12.0   16.0   20.0   24.0      388.0   392.0   396.0    400.0\n   5.0   10.0   15.0   20.0   25.0   30.0      485.0   490.0   495.0    500.0\n   6.0   12.0   18.0   24.0   30.0   36.0  …   582.0   588.0   594.0    600.0\n   7.0   14.0   21.0   28.0   35.0   42.0      679.0   686.0   693.0    700.0\n   8.0   16.0   24.0   32.0   40.0   48.0      776.0   784.0   792.0    800.0\n   9.0   18.0   27.0   36.0   45.0   54.0      873.0   882.0   891.0    900.0\n  10.0   20.0   30.0   40.0   50.0   60.0      970.0   980.0   990.0   1000.0\n   ⋮                                  ⋮    ⋱                                 \n  92.0  184.0  276.0  368.0  460.0  552.0     8924.0  9016.0  9108.0   9200.0\n  93.0  186.0  279.0  372.0  465.0  558.0     9021.0  9114.0  9207.0   9300.0\n  94.0  188.0  282.0  376.0  470.0  564.0     9118.0  9212.0  9306.0   9400.0\n  95.0  190.0  285.0  380.0  475.0  570.0     9215.0  9310.0  9405.0   9500.0\n  96.0  192.0  288.0  384.0  480.0  576.0  …  9312.0  9408.0  9504.0   9600.0\n  97.0  194.0  291.0  388.0  485.0  582.0     9409.0  9506.0  9603.0   9700.0\n  98.0  196.0  294.0  392.0  490.0  588.0     9506.0  9604.0  9702.0   9800.0\n  99.0  198.0  297.0  396.0  495.0  594.0     9603.0  9702.0  9801.0   9900.0\n 100.0  200.0  300.0  400.0  500.0  600.0     9700.0  9800.0  9900.0  10000.0"
+@test replstr((1.:100.)*(1:100)') == "100×100 Array{Float64,2}:\n   1.0    2.0    3.0    4.0    5.0    6.0  …    97.0    98.0    99.0    100.0\n   2.0    4.0    6.0    8.0   10.0   12.0      194.0   196.0   198.0    200.0\n   3.0    6.0    9.0   12.0   15.0   18.0      291.0   294.0   297.0    300.0\n   4.0    8.0   12.0   16.0   20.0   24.0      388.0   392.0   396.0    400.0\n   5.0   10.0   15.0   20.0   25.0   30.0      485.0   490.0   495.0    500.0\n   6.0   12.0   18.0   24.0   30.0   36.0  …   582.0   588.0   594.0    600.0\n   7.0   14.0   21.0   28.0   35.0   42.0      679.0   686.0   693.0    700.0\n   8.0   16.0   24.0   32.0   40.0   48.0      776.0   784.0   792.0    800.0\n   9.0   18.0   27.0   36.0   45.0   54.0      873.0   882.0   891.0    900.0\n  10.0   20.0   30.0   40.0   50.0   60.0      970.0   980.0   990.0   1000.0\n   ⋮                                  ⋮    ⋱                                 \n  92.0  184.0  276.0  368.0  460.0  552.0     8924.0  9016.0  9108.0   9200.0\n  93.0  186.0  279.0  372.0  465.0  558.0     9021.0  9114.0  9207.0   9300.0\n  94.0  188.0  282.0  376.0  470.0  564.0     9118.0  9212.0  9306.0   9400.0\n  95.0  190.0  285.0  380.0  475.0  570.0     9215.0  9310.0  9405.0   9500.0\n  96.0  192.0  288.0  384.0  480.0  576.0  …  9312.0  9408.0  9504.0   9600.0\n  97.0  194.0  291.0  388.0  485.0  582.0     9409.0  9506.0  9603.0   9700.0\n  98.0  196.0  294.0  392.0  490.0  588.0     9506.0  9604.0  9702.0   9800.0\n  99.0  198.0  297.0  396.0  495.0  594.0     9603.0  9702.0  9801.0   9900.0\n 100.0  200.0  300.0  400.0  500.0  600.0     9700.0  9800.0  9900.0  10000.0"
 
 # Issue 14121
 @test_repr "(A'x)'"
@@ -362,15 +394,15 @@ end
 
 
 # issue #15309
-l1, l2, l2n = Expr(:line,42), Expr(:line,42,:myfile), LineNumberNode(:myfile,42)
-@test string(l2n) == " # myfile, line 42:"
-@test string(l2)  == string(l2n)
-@test string(l1)  == replace(string(l2n),"myfile, ","",1)
+l1, l2, l2n = Expr(:line,42), Expr(:line,42,:myfile), LineNumberNode(42)
+@test string(l2n) == " # line 42:"
+@test string(l2)  == " # myfile, line 42:"
+@test string(l1)  == string(l2n)
 ex = Expr(:block, l1, :x, l2, :y, l2n, :z)
 @test replace(string(ex)," ","") == replace("""
 begin  # line 42:
     x # myfile, line 42:
-    y # myfile, line 42:
+    y # line 42:
     z
 end""", " ", "")
 # Test the printing of whatever form of line number representation
@@ -385,16 +417,79 @@ str_ex2a, str_ex2b = @strquote(begin x end), string(quote x end)
 
 # test structured zero matrix printing for select structured types
 A = reshape(1:16,4,4)
-@test replstr(Diagonal(A)) == "4x4 Diagonal{$Int}:\n 1  ⋅   ⋅   ⋅\n ⋅  6   ⋅   ⋅\n ⋅  ⋅  11   ⋅\n ⋅  ⋅   ⋅  16"
-@test replstr(Bidiagonal(A,true)) == "4x4 Bidiagonal{$Int}:\n 1  5   ⋅   ⋅\n ⋅  6  10   ⋅\n ⋅  ⋅  11  15\n ⋅  ⋅   ⋅  16"
-@test replstr(Bidiagonal(A,false)) == "4x4 Bidiagonal{$Int}:\n 1  ⋅   ⋅   ⋅\n 2  6   ⋅   ⋅\n ⋅  7  11   ⋅\n ⋅  ⋅  12  16"
-@test replstr(SymTridiagonal(A+A')) == "4x4 SymTridiagonal{$Int}:\n 2   7   ⋅   ⋅\n 7  12  17   ⋅\n ⋅  17  22  27\n ⋅   ⋅  27  32"
-@test replstr(Tridiagonal(diag(A,-1),diag(A),diag(A,+1))) == "4x4 Tridiagonal{$Int}:\n 1  5   ⋅   ⋅\n 2  6  10   ⋅\n ⋅  7  11  15\n ⋅  ⋅  12  16"
-@test replstr(UpperTriangular(A)) == "4x4 UpperTriangular{$Int,Array{$Int,2}}:\n 1  5   9  13\n ⋅  6  10  14\n ⋅  ⋅  11  15\n ⋅  ⋅   ⋅  16"
-@test replstr(LowerTriangular(A)) == "4x4 LowerTriangular{$Int,Array{$Int,2}}:\n 1  ⋅   ⋅   ⋅\n 2  6   ⋅   ⋅\n 3  7  11   ⋅\n 4  8  12  16"
+@test replstr(Diagonal(A)) == "4×4 Diagonal{$Int}:\n 1  ⋅   ⋅   ⋅\n ⋅  6   ⋅   ⋅\n ⋅  ⋅  11   ⋅\n ⋅  ⋅   ⋅  16"
+@test replstr(Bidiagonal(A,true)) == "4×4 Bidiagonal{$Int}:\n 1  5   ⋅   ⋅\n ⋅  6  10   ⋅\n ⋅  ⋅  11  15\n ⋅  ⋅   ⋅  16"
+@test replstr(Bidiagonal(A,false)) == "4×4 Bidiagonal{$Int}:\n 1  ⋅   ⋅   ⋅\n 2  6   ⋅   ⋅\n ⋅  7  11   ⋅\n ⋅  ⋅  12  16"
+@test replstr(SymTridiagonal(A+A')) == "4×4 SymTridiagonal{$Int}:\n 2   7   ⋅   ⋅\n 7  12  17   ⋅\n ⋅  17  22  27\n ⋅   ⋅  27  32"
+@test replstr(Tridiagonal(diag(A,-1),diag(A),diag(A,+1))) == "4×4 Tridiagonal{$Int}:\n 1  5   ⋅   ⋅\n 2  6  10   ⋅\n ⋅  7  11  15\n ⋅  ⋅  12  16"
+@test replstr(UpperTriangular(copy(A))) == "4×4 UpperTriangular{$Int,Array{$Int,2}}:\n 1  5   9  13\n ⋅  6  10  14\n ⋅  ⋅  11  15\n ⋅  ⋅   ⋅  16"
+@test replstr(LowerTriangular(copy(A))) == "4×4 LowerTriangular{$Int,Array{$Int,2}}:\n 1  ⋅   ⋅   ⋅\n 2  6   ⋅   ⋅\n 3  7  11   ⋅\n 4  8  12  16"
+
+# Vararg methods in method tables
+function test_mt(f, str)
+    mt = methods(f)
+    @test length(mt) == 1
+    defs = first(mt)
+    io = IOBuffer()
+    show(io, defs)
+    strio = takebuf_string(io)
+    strio = split(strio, " at")[1]
+    @test strio[1:length(str)] == str
+end
+show_f1(x...) = [x...]
+show_f2(x::Vararg{Any}) = [x...]
+show_f3(x::Vararg) = [x...]
+show_f4(x::Vararg{Any,3}) = [x...]
+show_f5{T,N}(A::AbstractArray{T,N}, indexes::Vararg{Int,N}) = [indexes...]
+test_mt(show_f1, "show_f1(x...)")
+test_mt(show_f2, "show_f2(x...)")
+test_mt(show_f3, "show_f3(x...)")
+test_mt(show_f4, "show_f4(x::Vararg{Any,3})")
+test_mt(show_f5, "show_f5{T,N}(A::AbstractArray{T,N}, indexes::Vararg{$Int,N})")
 
 # Issue #15525, printing of vcat
 @test sprint(show, :([a;])) == ":([a;])"
 @test sprint(show, :([a;b])) == ":([a;b])"
 @test_repr "[a;]"
 @test_repr "[a;b]"
+
+# Printing of :(function f end)
+@test sprint(show, :(function f end)) == ":(function f end)"
+@test_repr "function g end"
+
+# Issue #15765 printing of continue and break
+@test sprint(show, :(continue)) == ":(continue)"
+@test sprint(show, :(break)) == ":(break)"
+@test_repr "continue"
+@test_repr "break"
+
+let x = [], y = []
+    push!(x, y)
+    push!(y, x)
+    @test replstr(x) == "1-element Array{Any,1}:\n Any[Any[Any[#= circular reference @-2 =#]]]"
+end
+
+# PR 16221
+# Printing of upper and lower bound of a TypeVar
+@test string(TypeVar(:V, Signed, Real, false)) == "Signed<:V<:Real"
+# Printing of primary type in type parameter place should not show the type
+# parameter names.
+@test string(Array) == "Array{T,N}"
+@test string(Tuple{Array}) == "Tuple{Array}"
+
+# PR #16651
+@test !contains(repr(ones(10,10)), "\u2026")
+@test contains(sprint((io,x)->show(IOContext(io,:limit=>true), x), ones(30,30)), "\u2026")
+
+# showcompact() also sets :multiline=>false (#16817)
+let io = IOBuffer()
+    x = [1, 2]
+    showcompact(io, x)
+    @test takebuf_string(io) == "[1,2]"
+    showcompact(IOContext(io, :multiline=>true), x)
+    @test takebuf_string(io) == "[1,2]"
+    showcompact(IOContext(io, :compact=>true), x)
+    @test takebuf_string(io) == "[1,2]"
+    showcompact(IOContext(IOContext(io, :compact=>true), :multiline=>true), x)
+    @test takebuf_string(io) == "[1,2]"
+end

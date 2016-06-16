@@ -90,24 +90,22 @@ wait(port)
 wait(tsk)
 
 mktempdir() do tmpdir
-    socketname = @windows ? ("\\\\.\\pipe\\uv-test-" * randstring(6)) : joinpath(tmpdir, "socket")
+    socketname = is_windows() ? ("\\\\.\\pipe\\uv-test-" * randstring(6)) : joinpath(tmpdir, "socket")
     c = Base.Condition()
-    for T in (ASCIIString, UTF8String, UTF16String) # test for issue #9435
-        tsk = @async begin
-            s = listen(T(socketname))
-            Base.notify(c)
-            sock = accept(s)
-            write(sock,"Hello World\n")
-            close(s)
-            close(sock)
-        end
-        wait(c)
-        @test readstring(connect(socketname)) == "Hello World\n"
-        wait(tsk)
+    tsk = @async begin
+        s = listen(socketname)
+        Base.notify(c)
+        sock = accept(s)
+        write(sock,"Hello World\n")
+        close(s)
+        close(sock)
     end
+    wait(c)
+    @test readstring(connect(socketname)) == "Hello World\n"
+    wait(tsk)
 end
 
-@test_throws Base.UVError getaddrinfo(".invalid")
+@test_throws Base.DNSError getaddrinfo(".invalid")
 @test_throws ArgumentError getaddrinfo("localhost\0") # issue #10994
 @test_throws Base.UVError connect("localhost", 21452)
 
@@ -137,7 +135,7 @@ port2, server2 = listenany(port)
 close(server)
 close(server2)
 
-@test_throws Base.UVError connect(".invalid",80)
+@test_throws Base.DNSError connect(".invalid",80)
 
 begin
     a = UDPSocket()
@@ -147,10 +145,10 @@ begin
 
     c = Condition()
     tsk = @async begin
-        @test bytestring(recv(a)) == "Hello World"
+        @test String(recv(a)) == "Hello World"
     # Issue 6505
         @async begin
-            @test bytestring(recv(a)) == "Hello World"
+            @test String(recv(a)) == "Hello World"
             notify(c)
         end
         send(b,ip"127.0.0.1",port,"Hello World")
@@ -162,7 +160,7 @@ begin
     tsk = @async begin
         @test begin
             (addr,data) = recvfrom(a)
-            addr == ip"127.0.0.1" && bytestring(data) == "Hello World"
+            addr == ip"127.0.0.1" && String(data) == "Hello World"
         end
     end
     send(b, ip"127.0.0.1",port,"Hello World")
@@ -173,7 +171,7 @@ begin
     close(a)
     close(b)
 end
-if @unix? true : (Base.windows_version() >= Base.WINDOWS_VISTA_VER)
+if !is_windows() || Sys.windows_version() >= Sys.WINDOWS_VISTA_VER
     a = UDPSocket()
     b = UDPSocket()
     bind(a, ip"::1", UInt16(port))
@@ -182,7 +180,7 @@ if @unix? true : (Base.windows_version() >= Base.WINDOWS_VISTA_VER)
     tsk = @async begin
         @test begin
             (addr, data) = recvfrom(a)
-            addr == ip"::1" && bytestring(data) == "Hello World"
+            addr == ip"::1" && String(data) == "Hello World"
         end
     end
     send(b, ip"::1", port, "Hello World")
@@ -245,7 +243,7 @@ end
 # Local-machine broadcast
 let
     # (Mac OS X's loopback interface doesn't support broadcasts)
-    bcastdst = @osx ? ip"255.255.255.255" : ip"127.255.255.255"
+    bcastdst = is_apple() ? ip"255.255.255.255" : ip"127.255.255.255"
 
     function create_socket()
         s = UDPSocket()
@@ -256,7 +254,7 @@ let
     try
         @sync begin
             send(c, bcastdst, 2000, "hello")
-            recvs = [@async @test bytestring(recv(s)) == "hello" for s in (a, b)]
+            recvs = [@async @test String(recv(s)) == "hello" for s in (a, b)]
             map(wait, recvs)
         end
     catch e

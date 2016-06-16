@@ -2,8 +2,8 @@
 
 ## 1-dimensional ranges ##
 
-typealias Dims Tuple{Vararg{Int}}
-typealias DimsInteger Tuple{Vararg{Integer}}
+typealias Dims{N} NTuple{N,Int}
+typealias DimsInteger{N} NTuple{N,Integer}
 
 abstract Range{T} <: AbstractArray{T,1}
 
@@ -236,13 +236,25 @@ linspace(start::Real, stop::Real, len::Real=50) =
     linspace(promote(AbstractFloat(start), AbstractFloat(stop))..., len)
 
 function show(io::IO, r::LinSpace)
-    print(io, "linspace(")
-    show(io, first(r))
-    print(io, ',')
-    show(io, last(r))
-    print(io, ',')
-    show(io, length(r))
-    print(io, ')')
+    if get(io, :multiline, false)
+        # show for linspace, e.g.
+        # linspace(1,3,7)
+        # 7-element LinSpace{Float64}:
+        #   1.0,1.33333,1.66667,2.0,2.33333,2.66667,3.0
+        print(io, summary(r))
+        if !isempty(r)
+            println(io, ":")
+            print_range(io, r)
+        end
+    else
+        print(io, "linspace(")
+        show(io, first(r))
+        print(io, ',')
+        show(io, last(r))
+        print(io, ',')
+        show(io, length(r))
+        print(io, ')')
+    end
 end
 
 """
@@ -264,9 +276,12 @@ function print_range(io::IO, r::Range,
                      post::AbstractString = "",
                      hdots::AbstractString = ",\u2026,") # horiz ellipsis
     # This function borrows from print_matrix() in show.jl
-    # and should be called by writemime (replutil.jl) and by display()
-    limit = limit_output(io)
+    # and should be called by show and display
+    limit = get(io, :limit, false)
     sz = displaysize(io)
+    if !haskey(io, :compact)
+        io = IOContext(io, compact=true)
+    end
     screenheight, screenwidth = sz[1] - 4, sz[2]
     screenwidth -= length(pre) + length(post)
     postsp = ""
@@ -413,26 +428,32 @@ end
 
 ## indexing
 
+function getindex{T}(v::UnitRange{T}, i::Integer)
+    @_inline_meta
+    ret = convert(T, first(v) + i - 1)
+    @boundscheck ((i > 0) & (ret <= v.stop) & (ret >= v.start)) || throw_boundserror(v, i)
+    ret
+end
+
 function getindex{T}(v::Range{T}, i::Integer)
     @_inline_meta
-    @boundscheck checkbounds(v, i)
-    convert(T, first(v) + (i-1)*step(v))
-end
-function getindex{T<:Union{Int8,UInt8,Int16,UInt16,Int32,UInt32}}(v::Range{T},i::Integer)
-    @_inline_meta
-    @boundscheck checkbounds(v, i)
-    (first(v) + (i - 1) * step(v)) % T
+    ret = convert(T, first(v) + (i - 1)*step(v))
+    ok = ifelse(step(v) > zero(step(v)),
+                (ret <= v.stop) & (ret >= v.start),
+                (ret <= v.start) & (ret >= v.stop))
+    @boundscheck ((i > 0) & ok) || throw_boundserror(v, i)
+    ret
 end
 
 function getindex{T}(r::FloatRange{T}, i::Integer)
     @_inline_meta
-    @boundscheck checkbounds(r, i);
+    @boundscheck checkbounds(r, i)
     convert(T, (r.start + (i-1)*r.step)/r.divisor)
 end
 
 function getindex{T}(r::LinSpace{T}, i::Integer)
     @_inline_meta
-    @boundscheck checkbounds(r, i);
+    @boundscheck checkbounds(r, i)
     convert(T, ((r.len-i)*r.start + (i-1)*r.stop)/r.divisor)
 end
 
@@ -665,8 +686,8 @@ end
 
 promote_rule{T1,T2}(::Type{UnitRange{T1}},::Type{UnitRange{T2}}) =
     UnitRange{promote_type(T1,T2)}
-convert{T}(::Type{UnitRange{T}}, r::UnitRange{T}) = r
-convert{T}(::Type{UnitRange{T}}, r::UnitRange) = UnitRange{T}(r.start, r.stop)
+convert{T<:Real}(::Type{UnitRange{T}}, r::UnitRange{T}) = r
+convert{T<:Real}(::Type{UnitRange{T}}, r::UnitRange) = UnitRange{T}(r.start, r.stop)
 
 promote_rule{T1a,T1b,T2a,T2b}(::Type{StepRange{T1a,T1b}},::Type{StepRange{T2a,T2b}}) =
     StepRange{promote_type(T1a,T2a),promote_type(T1b,T2b)}
@@ -681,26 +702,26 @@ convert{T}(::Type{StepRange}, r::UnitRange{T}) =
 
 promote_rule{T1,T2}(::Type{FloatRange{T1}},::Type{FloatRange{T2}}) =
     FloatRange{promote_type(T1,T2)}
-convert{T}(::Type{FloatRange{T}}, r::FloatRange{T}) = r
-convert{T}(::Type{FloatRange{T}}, r::FloatRange) =
+convert{T<:AbstractFloat}(::Type{FloatRange{T}}, r::FloatRange{T}) = r
+convert{T<:AbstractFloat}(::Type{FloatRange{T}}, r::FloatRange) =
     FloatRange{T}(r.start,r.step,r.len,r.divisor)
 
 promote_rule{F,OR<:OrdinalRange}(::Type{FloatRange{F}}, ::Type{OR}) =
     FloatRange{promote_type(F,eltype(OR))}
-convert{T}(::Type{FloatRange{T}}, r::OrdinalRange) =
+convert{T<:AbstractFloat}(::Type{FloatRange{T}}, r::OrdinalRange) =
     FloatRange{T}(first(r), step(r), length(r), one(T))
 convert{T}(::Type{FloatRange}, r::OrdinalRange{T}) =
     FloatRange{typeof(float(first(r)))}(first(r), step(r), length(r), one(T))
 
 promote_rule{T1,T2}(::Type{LinSpace{T1}},::Type{LinSpace{T2}}) =
     LinSpace{promote_type(T1,T2)}
-convert{T}(::Type{LinSpace{T}}, r::LinSpace{T}) = r
-convert{T}(::Type{LinSpace{T}}, r::LinSpace) =
+convert{T<:AbstractFloat}(::Type{LinSpace{T}}, r::LinSpace{T}) = r
+convert{T<:AbstractFloat}(::Type{LinSpace{T}}, r::LinSpace) =
     LinSpace{T}(r.start, r.stop, r.len, r.divisor)
 
 promote_rule{F,OR<:OrdinalRange}(::Type{LinSpace{F}}, ::Type{OR}) =
     LinSpace{promote_type(F,eltype(OR))}
-convert{T}(::Type{LinSpace{T}}, r::OrdinalRange) =
+convert{T<:AbstractFloat}(::Type{LinSpace{T}}, r::OrdinalRange) =
     linspace(convert(T, first(r)), convert(T, last(r)), convert(T, length(r)))
 convert{T}(::Type{LinSpace}, r::OrdinalRange{T}) =
     convert(LinSpace{typeof(float(first(r)))}, r)
@@ -708,9 +729,9 @@ convert{T}(::Type{LinSpace}, r::OrdinalRange{T}) =
 # Promote FloatRange to LinSpace
 promote_rule{F,OR<:FloatRange}(::Type{LinSpace{F}}, ::Type{OR}) =
     LinSpace{promote_type(F,eltype(OR))}
-convert{T}(::Type{LinSpace{T}}, r::FloatRange) =
+convert{T<:AbstractFloat}(::Type{LinSpace{T}}, r::FloatRange) =
     linspace(convert(T, first(r)), convert(T, last(r)), convert(T, length(r)))
-convert{T}(::Type{LinSpace}, r::FloatRange{T}) =
+convert{T<:AbstractFloat}(::Type{LinSpace}, r::FloatRange{T}) =
     convert(LinSpace{T}, r)
 
 
@@ -740,7 +761,7 @@ function vcat{T}(rs::Range{T}...)
     for ra in rs
         n += length(ra)
     end
-    a = Array(T,n)
+    a = Array{T}(n)
     i = 1
     for ra in rs, x in ra
         @inbounds a[i] = x
@@ -799,5 +820,6 @@ function in(x, r::Range)
     n >= 1 && n <= length(r) && r[n] == x
 end
 
+in{T<:Integer}(x::Integer, r::UnitRange{T}) = (first(r) <= x) & (x <= last(r))
 in{T<:Integer}(x, r::Range{T}) = isinteger(x) && !isempty(r) && x>=minimum(r) && x<=maximum(r) && (mod(convert(T,x),step(r))-mod(first(r),step(r)) == 0)
 in(x::Char, r::Range{Char}) = !isempty(r) && x >= minimum(r) && x <= maximum(r) && (mod(Int(x) - Int(first(r)), step(r)) == 0)

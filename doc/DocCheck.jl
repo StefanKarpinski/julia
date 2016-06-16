@@ -54,7 +54,7 @@ function undocumented_by_file(m::Module)
     for (f,_) in undocumented(m)
         s = string(f)
         try
-            for (file, line) in functionlocs(eval(f))
+            for (file, line) in map(functionloc,methods(eval(f)))
                 if startswith(file, JULIA_HOME)
                     file = replace(file, JULIA_HOME, "\$JULIA_HOME", 1)
                 end
@@ -99,10 +99,10 @@ function _undocumented_rst()
             if line[1]=='#'
                if line[2]!= ' ' continue end
             else
-               s = symbol(line) # for submodules: string(:Sort) == "Base.Sort"
+               s = Symbol(line) # for submodules: string(:Sort) == "Base.Sort"
                if !isdefined(s) continue end
                if haskey(FUNCTION_DICT, line) || haskey(MODULE_DICT, line)
-                  m = eval(symbol(getkey(MODULE_DICT, line, "Base")))
+                  m = eval(Symbol(getkey(MODULE_DICT, line, "Base")))
                   isdeprecated(m,s) && continue
                   havecount+=1; total+=1; continue
                end
@@ -154,13 +154,13 @@ function gen_undocumented_template(outfile = "$JULIA_HOME/../../doc/UNDOCUMENTED
                 println(out)
                 continue
             else
-                s = symbol(line) # for submodules: string(:Sort) == "Base.Sort"
+                s = Symbol(line) # for submodules: string(:Sort) == "Base.Sort"
                 if !isdefined(s) continue end
                 if haskey(FUNCTION_DICT, line) || haskey(MODULE_DICT, line)
                     continue
                 end
                 if line[1]=='@'; line = line[2:end] end
-                sym = try eval(symbol(line)) catch :() end
+                sym = try eval(Symbol(line)) catch :() end
                 if isa(sym, Function)
                     mt = methods(sym)
                     if length(mt) == 1  # easy case

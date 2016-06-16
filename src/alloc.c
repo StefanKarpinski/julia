@@ -29,8 +29,7 @@ jl_value_t *jl_array_uint8_type;
 jl_value_t *jl_array_any_type=NULL;
 jl_value_t *jl_array_symbol_type;
 jl_datatype_t *jl_weakref_type;
-jl_datatype_t *jl_ascii_string_type;
-jl_datatype_t *jl_utf8_string_type;
+jl_datatype_t *jl_string_type;
 jl_datatype_t *jl_expr_type;
 jl_datatype_t *jl_globalref_type;
 jl_datatype_t *jl_linenumbernode_type;
@@ -38,10 +37,11 @@ jl_datatype_t *jl_labelnode_type;
 jl_datatype_t *jl_gotonode_type;
 jl_datatype_t *jl_quotenode_type;
 jl_datatype_t *jl_newvarnode_type;
-jl_datatype_t *jl_topnode_type;
 jl_datatype_t *jl_intrinsic_type;
-jl_datatype_t *jl_methtable_type;
 jl_datatype_t *jl_method_type;
+jl_datatype_t *jl_methtable_type;
+jl_datatype_t *jl_typemap_entry_type;
+jl_datatype_t *jl_typemap_level_type;
 jl_datatype_t *jl_lambda_info_type;
 jl_datatype_t *jl_module_type;
 jl_datatype_t *jl_errorexception_type=NULL;
@@ -55,7 +55,7 @@ jl_datatype_t *jl_ref_type;
 jl_datatype_t *jl_pointer_type;
 jl_datatype_t *jl_void_type;
 jl_datatype_t *jl_voidpointer_type;
-jl_value_t *jl_an_empty_cell=NULL;
+jl_value_t *jl_an_empty_vec_any=NULL;
 jl_value_t *jl_stackovf_exception;
 #ifdef SEGV_EXCEPTION
 jl_value_t *jl_segv_exception;
@@ -69,9 +69,11 @@ jl_value_t *jl_interrupt_exception;
 jl_datatype_t *jl_boundserror_type;
 jl_value_t *jl_memory_exception;
 jl_value_t *jl_readonlymemory_exception;
+union jl_typemap_t jl_cfunction_list;
 
 jl_sym_t *call_sym;    jl_sym_t *dots_sym;
 jl_sym_t *module_sym;  jl_sym_t *slot_sym;
+jl_sym_t *empty_sym;
 jl_sym_t *export_sym;  jl_sym_t *import_sym;
 jl_sym_t *importall_sym; jl_sym_t *toplevel_sym;
 jl_sym_t *quote_sym;   jl_sym_t *amp_sym;
@@ -82,10 +84,11 @@ jl_sym_t *goto_sym;    jl_sym_t *goto_ifnot_sym;
 jl_sym_t *label_sym;   jl_sym_t *return_sym;
 jl_sym_t *lambda_sym;  jl_sym_t *assign_sym;
 jl_sym_t *null_sym;    jl_sym_t *body_sym;
-jl_sym_t *method_sym;
+jl_sym_t *method_sym;  jl_sym_t *core_sym;
 jl_sym_t *enter_sym;   jl_sym_t *leave_sym;
 jl_sym_t *exc_sym;     jl_sym_t *error_sym;
 jl_sym_t *static_typeof_sym;
+jl_sym_t *globalref_sym;
 jl_sym_t *new_sym;     jl_sym_t *using_sym;
 jl_sym_t *const_sym;   jl_sym_t *thunk_sym;
 jl_sym_t *anonymous_sym;  jl_sym_t *underscore_sym;
@@ -99,6 +102,7 @@ jl_sym_t *pure_sym; jl_sym_t *simdloop_sym;
 jl_sym_t *meta_sym; jl_sym_t *compiler_temp_sym;
 jl_sym_t *inert_sym; jl_sym_t *vararg_sym;
 jl_sym_t *unused_sym; jl_sym_t *static_parameter_sym;
+jl_sym_t *polly_sym;
 
 typedef struct {
     int64_t a;
@@ -108,20 +112,6 @@ typedef struct {
 // Note that this function updates len
 static jl_value_t *jl_new_bits_internal(jl_value_t *dt, void *data, size_t *len)
 {
-    if (jl_is_ntuple_type(dt)) {
-        jl_value_t *lenvar = jl_tparam0(dt);
-        jl_value_t *elty = jl_tparam1(dt);
-        assert(jl_is_datatype(elty));
-        size_t alignment = ((jl_datatype_t*)elty)->alignment;
-        *len = LLT_ALIGN((*len), alignment);
-        assert(jl_is_long(lenvar));
-        size_t l = jl_unbox_long(lenvar);
-        size_t nb = l*LLT_ALIGN(jl_datatype_size(elty), alignment);
-        jl_value_t *v = (jl_value_t*)newobj(dt, NWORDS(nb));
-        memcpy(jl_data_ptr(v), data, nb);
-        return v;
-    }
-
     assert(jl_is_datatype(dt));
     jl_datatype_t *bt = (jl_datatype_t*)dt;
     size_t nb = jl_datatype_size(bt);
@@ -271,54 +261,79 @@ JL_DLLEXPORT jl_value_t *jl_new_struct_uninit(jl_datatype_t *type)
     return jv;
 }
 
-JL_DLLEXPORT void jl_lambda_info_init_properties(jl_lambda_info_t *li)
+extern jl_value_t *jl_builtin_getfield;
+jl_value_t *jl_resolve_globals(jl_value_t *expr, jl_lambda_info_t *lam)
 {
-    int i;
-    uint8_t called=0;
-    for(i=1; i < li->nargs && i <= 8; i++) {
-        jl_value_t *ai = jl_cellref(li->slotnames,i);
-        if (ai == (jl_value_t*)unused_sym) continue;
-        if (jl_array_uint8_ref(li->slotflags,i)&64)
-            called |= (1<<(i-1));
+    if (jl_is_symbol(expr)) {
+        if (lam->def->module == NULL)
+            return expr;
+        return jl_module_globalref(lam->def->module, (jl_sym_t*)expr);
     }
-    li->called = called;
+    else if (jl_is_expr(expr)) {
+        jl_expr_t *e = (jl_expr_t*)expr;
+        if (jl_is_toplevel_only_expr(expr) || e->head == const_sym || e->head == copyast_sym ||
+            e->head == global_sym || e->head == quote_sym || e->head == inert_sym ||
+            e->head == line_sym || e->head == meta_sym || e->head == inbounds_sym ||
+            e->head == boundscheck_sym || e->head == simdloop_sym) {
+        }
+        else {
+            if (e->head == call_sym && jl_expr_nargs(e) == 3 && jl_is_quotenode(jl_exprarg(e,2)) &&
+                lam->def->module != NULL) {
+                // replace getfield(module_expr, :sym) with GlobalRef
+                jl_value_t *s = jl_fieldref(jl_exprarg(e,2),0);
+                jl_value_t *fe = jl_exprarg(e,0);
+                if (jl_is_symbol(s) && jl_is_globalref(fe)) {
+                    jl_value_t *f = jl_static_eval(fe, NULL, lam->def->module, lam, 0, 0);
+                    if (f == jl_builtin_getfield) {
+                        jl_value_t *me = jl_exprarg(e,1);
+                        if (jl_is_globalref(me) ||
+                            (jl_is_symbol(me) && jl_binding_resolved_p(lam->def->module, (jl_sym_t*)me))) {
+                            jl_value_t *m = jl_static_eval(me, NULL, lam->def->module, lam, 0, 0);
+                            if (m && jl_is_module(m))
+                                return jl_module_globalref((jl_module_t*)m, (jl_sym_t*)s);
+                        }
+                    }
+                }
+            }
+            size_t i = 0;
+            if (e->head == method_sym || e->head == abstracttype_sym || e->head == compositetype_sym ||
+                e->head == bitstype_sym || e->head == module_sym)
+                i++;
+            for(; i < jl_array_len(e->args); i++) {
+                jl_exprargset(e, i, jl_resolve_globals(jl_exprarg(e,i), lam));
+            }
+        }
+    }
+    return expr;
 }
 
-JL_DLLEXPORT void jl_lambda_info_set_ast(jl_lambda_info_t *li, jl_value_t *ast)
+// copy a :lambda Expr into its LambdaInfo representation
+static void jl_lambda_info_set_ast(jl_lambda_info_t *li, jl_expr_t *ast)
 {
     assert(jl_is_expr(ast));
-    jl_array_t *body = jl_lam_body((jl_expr_t*)ast)->args;
-    li->code = body; jl_gc_wb(li, li->code);
+    jl_expr_t *bodyex = (jl_expr_t*)jl_exprarg(ast, 2);
+    assert(jl_is_expr(bodyex));
+    jl_array_t *body = bodyex->args;
+    li->code = (jl_value_t*)body; jl_gc_wb(li, li->code);
     if (has_meta(body, pure_sym))
         li->pure = 1;
-    jl_value_t *body1 = skip_meta(body);
-    if (jl_is_linenode(body1)) {
-        li->file = jl_linenode_file(body1);
-        li->line = jl_linenode_line(body1);
-    }
-    else if (jl_is_expr(body1) && ((jl_expr_t*)body1)->head == line_sym) {
-        li->file = (jl_sym_t*)jl_exprarg(body1, 1);
-        li->line = jl_unbox_long(jl_exprarg(body1, 0));
-    }
-    jl_array_t *vis = jl_lam_vinfo((jl_expr_t*)ast);
-    jl_array_t *args = jl_lam_args((jl_expr_t*)ast);
+    jl_array_t *vinfo = (jl_array_t*)jl_exprarg(ast, 1);
+    jl_array_t *vis = (jl_array_t*)jl_array_ptr_ref(vinfo, 0);
     size_t nslots = jl_array_len(vis);
-    size_t narg = jl_array_len(args);
-    li->nargs = narg;
-    li->isva = narg>0 && jl_is_rest_arg(jl_cellref(args, narg-1));
-    jl_value_t *gensym_types = jl_lam_gensyms((jl_expr_t*)ast);
-    size_t ngensym = (jl_is_array(gensym_types) ? jl_array_len(gensym_types) : jl_unbox_long(gensym_types));
-    li->slotnames = jl_alloc_cell_1d(nslots);
+    jl_value_t *ssavalue_types = jl_array_ptr_ref(vinfo, 2);
+    assert(jl_is_long(ssavalue_types));
+    size_t nssavalue = jl_unbox_long(ssavalue_types);
+    li->slotnames = jl_alloc_vec_any(nslots);
     jl_gc_wb(li, li->slotnames);
     li->slottypes = jl_nothing;
     li->slotflags = jl_alloc_array_1d(jl_array_uint8_type, nslots);
     jl_gc_wb(li, li->slotflags);
-    li->gensymtypes = jl_box_long(ngensym);
-    jl_gc_wb(li, li->gensymtypes);
+    li->ssavaluetypes = jl_box_long(nssavalue);
+    jl_gc_wb(li, li->ssavaluetypes);
     int i;
     for(i=0; i < nslots; i++) {
-        jl_value_t *vi = jl_cellref(vis, i);
-        jl_sym_t *name = (jl_sym_t*)jl_cellref(vi, 0);
+        jl_value_t *vi = jl_array_ptr_ref(vis, i);
+        jl_sym_t *name = (jl_sym_t*)jl_array_ptr_ref(vi, 0);
         assert(jl_is_symbol(name));
         char *str = jl_symbol_name(name);
         if (i > 0 && name != unused_sym) {
@@ -331,92 +346,288 @@ JL_DLLEXPORT void jl_lambda_info_set_ast(jl_lambda_info_t *li, jl_value_t *ast)
                     name = compiler_temp_sym;
             }
         }
-        jl_cellset(li->slotnames, i, name);
-        jl_array_uint8_set(li->slotflags, i, jl_unbox_long(jl_cellref(vi, 2)));
+        jl_array_ptr_set(li->slotnames, i, name);
+        jl_array_uint8_set(li->slotflags, i, jl_unbox_long(jl_array_ptr_ref(vi, 2)));
     }
-    jl_lambda_info_init_properties(li);
+    jl_array_t *sparams = (jl_array_t*)jl_array_ptr_ref(vinfo, 3);
+    assert(jl_is_array(sparams));
+    li->sparam_syms = jl_alloc_svec_uninit(jl_array_len(sparams));
+    jl_gc_wb(li, li->sparam_syms);
+    for(i=0; i < jl_array_len(sparams); i++) {
+        jl_svecset(li->sparam_syms, i, jl_array_ptr_ref(sparams, i));
+    }
+    jl_array_t *args = (jl_array_t*)jl_exprarg(ast, 0);
+    size_t narg = jl_array_len(args);
+    li->nargs = narg;
+    li->isva = narg > 0 && jl_is_rest_arg(jl_array_ptr_ref(args, narg - 1));
 }
 
-JL_DLLEXPORT
-jl_lambda_info_t *jl_new_lambda_info(jl_value_t *ast, jl_svec_t *tvars, jl_svec_t *sparams,
-                                     jl_module_t *ctx)
+JL_DLLEXPORT jl_lambda_info_t *jl_new_lambda_info_uninit(void)
 {
     jl_lambda_info_t *li =
         (jl_lambda_info_t*)newobj((jl_value_t*)jl_lambda_info_type,
                                   NWORDS(sizeof(jl_lambda_info_t)));
     li->code = NULL;
     li->slotnames = li->slotflags = NULL;
-    li->slottypes = li->gensymtypes = NULL;
+    li->slottypes = li->ssavaluetypes = NULL;
     li->rettype = (jl_value_t*)jl_any_type;
-    li->file = null_sym;
-    li->module = ctx;
-    li->sparam_syms = tvars;
-    li->sparam_vals = sparams;
-    li->tfunc = jl_nothing;
+    li->sparam_syms = jl_emptysvec;
+    li->sparam_vals = jl_emptysvec;
     li->fptr = NULL;
     li->jlcall_api = 0;
-    li->roots = NULL;
-    li->functionObjects.functionObject = NULL;
-    li->functionObjects.specFunctionObject = NULL;
-    li->functionObjects.cFunctionList = NULL;
+    li->compile_traced = 0;
+    li->functionObjectsDecls.functionObject = NULL;
+    li->functionObjectsDecls.specFunctionObject = NULL;
     li->functionID = 0;
     li->specFunctionID = 0;
     li->specTypes = NULL;
+    li->unspecialized_ducttape = NULL;
     li->inferred = 0;
     li->inInference = 0;
     li->inCompile = 0;
-    li->unspecialized = NULL;
-    li->specializations = NULL;
-    li->name = anonymous_sym;
-    li->def = li;
-    li->line = 0;
+    li->def = NULL;
     li->pure = 0;
-    li->called = 0xff;
-    li->needs_sparam_vals_ducttape = 2;
-    if (ast != NULL) {
-        JL_GC_PUSH1(&li);
-        jl_lambda_info_set_ast(li, ast);
-        JL_GC_POP();
-    }
+    li->inlineable = 0;
     return li;
 }
 
-JL_DLLEXPORT jl_lambda_info_t *jl_copy_lambda_info(jl_lambda_info_t *linfo)
+JL_DLLEXPORT jl_lambda_info_t *jl_new_lambda_info_from_ast(jl_expr_t *ast)
 {
-    jl_lambda_info_t *new_linfo =
-        jl_new_lambda_info(NULL, linfo->sparam_syms, linfo->sparam_vals, linfo->module);
+    jl_lambda_info_t *li=NULL;
+    JL_GC_PUSH1(&li);
+    li = jl_new_lambda_info_uninit();
+    jl_lambda_info_set_ast(li, ast);
+    JL_GC_POP();
+    return li;
+}
+
+// invoke (compiling if necessary) the jlcall function pointer for a method template
+STATIC_INLINE jl_value_t *jl_call_staged(jl_svec_t *sparam_vals, jl_lambda_info_t *meth,
+                                         jl_value_t **args, uint32_t nargs)
+{
+    if (__unlikely(meth->fptr == NULL)) {
+        jl_compile_linfo(meth);
+        jl_generate_fptr(meth);
+    }
+    assert(jl_svec_len(meth->sparam_syms) == jl_svec_len(sparam_vals));
+    if (__likely(meth->jlcall_api == 0))
+        return meth->fptr(args[0], &args[1], nargs-1);
+    else
+        return ((jl_fptr_sparam_t)meth->fptr)(sparam_vals, args[0], &args[1], nargs-1);
+}
+
+static jl_lambda_info_t *jl_instantiate_staged(jl_method_t *generator, jl_tupletype_t *tt, jl_svec_t *env)
+{
+    size_t i, l;
+    jl_expr_t *ex = NULL;
+    jl_value_t *linenum = NULL;
+    jl_svec_t *sparam_vals = env;
+    jl_lambda_info_t *func = generator->lambda_template;
+    JL_GC_PUSH4(&ex, &linenum, &sparam_vals, &func);
+    int last_in = in_pure_callback;
+    assert(jl_svec_len(func->sparam_syms) == jl_svec_len(sparam_vals));
+    JL_TRY {
+        in_pure_callback = 1;
+        ex = jl_exprn(lambda_sym, 2);
+
+        int nargs = func->nargs;
+        jl_array_t *argnames = jl_alloc_vec_any(nargs);
+        jl_array_ptr_set(ex->args, 0, argnames);
+        for (i = 0; i < nargs; i++)
+            jl_array_ptr_set(argnames, i, jl_array_ptr_ref(func->slotnames, i));
+
+        jl_expr_t *scopeblock = jl_exprn(jl_symbol("scope-block"), 1);
+        jl_array_ptr_set(ex->args, 1, scopeblock);
+        jl_expr_t *body = jl_exprn(jl_symbol("block"), 2);
+        jl_array_ptr_set(((jl_expr_t*)jl_exprarg(ex,1))->args, 0, body);
+        linenum = jl_box_long(generator->line);
+        jl_value_t *linenode = jl_new_struct(jl_linenumbernode_type, linenum);
+        jl_array_ptr_set(body->args, 0, linenode);
+
+        // invoke code generator
+        assert(jl_nparams(tt) == jl_array_len(argnames) ||
+               (func->isva && (jl_nparams(tt) >= jl_array_len(argnames) - 1)));
+        jl_array_ptr_set(body->args, 1,
+                jl_call_staged(sparam_vals, func, jl_svec_data(tt->parameters), jl_nparams(tt)));
+
+        if (func->sparam_syms != jl_emptysvec) {
+            // mark this function as having the same static parameters as the generator
+            size_t i, nsp = jl_svec_len(func->sparam_syms);
+            jl_expr_t *newast = jl_exprn(jl_symbol("with-static-parameters"), nsp + 1);
+            jl_exprarg(newast, 0) = (jl_value_t*)ex;
+            // (with-static-parameters func_expr sp_1 sp_2 ...)
+            for (i = 0; i < nsp; i++)
+                jl_exprarg(newast, i+1) = jl_svecref(func->sparam_syms, i);
+            ex = newast;
+        }
+
+        // need to eval macros in the right module, but not give a warning for the `eval` call unless that results in a call to `eval`
+        func = (jl_lambda_info_t*)jl_toplevel_eval_in_warn(generator->module, (jl_value_t*)ex, 1);
+
+        // finish marking this as a specialization of the generator
+        func->isva = generator->lambda_template->isva;
+        func->def = generator;
+        jl_gc_wb(func, generator);
+        func->sparam_vals = env;
+        jl_gc_wb(func, env);
+        func->specTypes = tt;
+        jl_gc_wb(func, tt);
+
+        jl_array_t *stmts = (jl_array_t*)func->code;
+        for(i = 0, l = jl_array_len(stmts); i < l; i++) {
+            jl_array_ptr_set(stmts, i, jl_resolve_globals(jl_array_ptr_ref(stmts, i), func));
+        }
+        in_pure_callback = last_in;
+    }
+    JL_CATCH {
+        in_pure_callback = last_in;
+        jl_rethrow();
+    }
+    JL_GC_POP();
+    return func;
+}
+
+static jl_lambda_info_t *jl_copy_lambda(jl_lambda_info_t *linfo)
+{
+    assert(linfo->sparam_vals == jl_emptysvec);
+    jl_lambda_info_t *new_linfo = jl_new_lambda_info_uninit();
     new_linfo->code = linfo->code;
     new_linfo->slotnames = linfo->slotnames;
     new_linfo->slottypes = linfo->slottypes;
     new_linfo->slotflags = linfo->slotflags;
-    new_linfo->gensymtypes = linfo->gensymtypes;
-    new_linfo->called = linfo->called;
+    new_linfo->ssavaluetypes = linfo->ssavaluetypes;
+    new_linfo->sparam_syms = linfo->sparam_syms;
+    new_linfo->sparam_vals = linfo->sparam_vals;
+    new_linfo->pure = linfo->pure;
+    new_linfo->inlineable = linfo->inlineable;
     new_linfo->nargs = linfo->nargs;
     new_linfo->isva = linfo->isva;
-    new_linfo->pure = linfo->pure;
     new_linfo->rettype = linfo->rettype;
-    new_linfo->tfunc = linfo->tfunc;
-    new_linfo->name = linfo->name;
-    new_linfo->roots = linfo->roots;
-    new_linfo->specTypes = linfo->specTypes;
-    new_linfo->unspecialized = linfo->unspecialized;
-    new_linfo->specializations = linfo->specializations;
     new_linfo->def = linfo->def;
-    new_linfo->file = linfo->file;
-    new_linfo->line = linfo->line;
-    new_linfo->fptr = linfo->fptr;
-    new_linfo->jlcall_api = linfo->jlcall_api;
-    new_linfo->functionObjects.functionObject = linfo->functionObjects.functionObject;
-    new_linfo->functionObjects.specFunctionObject = linfo->functionObjects.specFunctionObject;
-    new_linfo->functionID = linfo->functionID;
-    new_linfo->specFunctionID = linfo->specFunctionID;
-    new_linfo->needs_sparam_vals_ducttape = linfo->needs_sparam_vals_ducttape;
     return new_linfo;
+}
+
+// return a new lambda-info that has some extra static parameters merged in
+JL_DLLEXPORT jl_lambda_info_t *jl_get_specialized(jl_method_t *m, jl_tupletype_t *types, jl_svec_t *sp)
+{
+    jl_lambda_info_t *linfo = m->lambda_template;
+    jl_lambda_info_t *new_linfo;
+    assert(jl_svec_len(linfo->sparam_syms) == jl_svec_len(sp) || sp == jl_emptysvec);
+
+    if (!m->isstaged) {
+        new_linfo = jl_copy_lambda(linfo);
+        new_linfo->specTypes = types;
+        new_linfo->def = m;
+        new_linfo->sparam_vals = sp;
+
+        if (jl_options.compile_enabled == JL_OPTIONS_COMPILE_OFF ||
+                jl_options.compile_enabled == JL_OPTIONS_COMPILE_MIN) {
+            // copy fptr from the template method definition
+            new_linfo->fptr = linfo->fptr;
+            new_linfo->jlcall_api = linfo->jlcall_api;
+            if (jl_options.compile_enabled == JL_OPTIONS_COMPILE_OFF && new_linfo->fptr == NULL) {
+                jl_printf(JL_STDERR,"code missing for ");
+                jl_static_show(JL_STDERR, (jl_value_t*)new_linfo);
+                jl_printf(JL_STDERR, "  sysimg may not have been built with --compile=all\n");
+            }
+        }
+    }
+    else {
+        new_linfo = jl_instantiate_staged(m, types, sp);
+    }
+    return new_linfo;
+}
+
+JL_DLLEXPORT void jl_method_init_properties(jl_method_t *m)
+{
+    jl_lambda_info_t *li = m->lambda_template;
+    jl_value_t *body1 = skip_meta((jl_array_t*)li->code);
+    if (jl_is_linenode(body1)) {
+        m->line = jl_linenode_line(body1);
+    }
+    else if (jl_is_expr(body1) && ((jl_expr_t*)body1)->head == line_sym) {
+        m->file = (jl_sym_t*)jl_exprarg(body1, 1);
+        m->line = jl_unbox_long(jl_exprarg(body1, 0));
+    }
+
+    int i;
+    uint8_t called=0;
+    for(i=1; i < li->nargs && i <= 8; i++) {
+        jl_value_t *ai = jl_array_ptr_ref(li->slotnames,i);
+        if (ai == (jl_value_t*)unused_sym) continue;
+        if (jl_array_uint8_ref(li->slotflags,i)&64)
+            called |= (1<<(i-1));
+    }
+    m->called = called;
+}
+
+JL_DLLEXPORT jl_method_t *jl_new_method_uninit(void)
+{
+    jl_method_t *m =
+        (jl_method_t*)newobj((jl_value_t*)jl_method_type,
+                             NWORDS(sizeof(jl_method_t)));
+    m->specializations.unknown = jl_nothing;
+    m->sig = NULL;
+    m->tvars = NULL;
+    m->ambig = NULL;
+    m->roots = NULL;
+    m->module = jl_current_module;
+    m->lambda_template = NULL;
+    m->name = NULL;
+    m->file = null_sym;
+    m->line = 0;
+    m->called = 0xff;
+    m->invokes.unknown = NULL;
+    m->isstaged = 0;
+    m->needs_sparam_vals_ducttape = 2;
+    m->traced = 0;
+    return m;
+}
+
+jl_method_t *jl_new_method(jl_lambda_info_t *definition, jl_sym_t *name, jl_tupletype_t *sig, jl_svec_t *tvars, int isstaged)
+{
+    assert(definition->code);
+    jl_method_t *m = jl_new_method_uninit();
+    m->isstaged = isstaged;
+    m->name = name;
+    m->sig = sig;
+    if (jl_svec_len(tvars) == 1)
+        tvars = (jl_svec_t*)jl_svecref(tvars, 0);
+    m->tvars = tvars;
+    m->ambig = jl_nothing;
+    JL_GC_PUSH1(&m);
+    // the front end may add this lambda to multiple methods; make a copy if so
+    jl_method_t *oldm = definition->def;
+    int reused = oldm != NULL;
+    if (reused)
+        definition = jl_copy_lambda(definition);
+
+    definition->specTypes = isstaged ? jl_anytuple_type : sig;
+    m->lambda_template = definition;
+    jl_gc_wb(m, definition);
+    definition->def = m;
+    jl_gc_wb(definition, m);
+
+    if (reused) {
+        m->file = oldm->file;
+        m->line = oldm->line;
+        m->called = oldm->called;
+    }
+    else {
+        jl_array_t *stmts = (jl_array_t*)definition->code;
+        int i, l;
+        for(i = 0, l = jl_array_len(stmts); i < l; i++) {
+            jl_array_ptr_set(stmts, i, jl_resolve_globals(jl_array_ptr_ref(stmts, i), definition));
+        }
+        jl_method_init_properties(m);
+    }
+    JL_GC_POP();
+    return m;
 }
 
 // symbols --------------------------------------------------------------------
 
-JL_DEFINE_MUTEX(symbol_table)
+static jl_mutex_t symbol_table_lock;
 
 static jl_sym_t *volatile symtab = NULL;
 
@@ -429,15 +640,11 @@ static uintptr_t hash_symbol(const char *str, size_t len)
 
 static size_t symbol_nbytes(size_t len)
 {
-    return (sizeof_jl_taggedvalue_t + sizeof(jl_sym_t) + len + 1 + 7) & -8;
+    return (sizeof(jl_taggedvalue_t) + sizeof(jl_sym_t) + len + 1 + 7) & -8;
 }
 
 static jl_sym_t *mk_symbol(const char *str, size_t len)
 {
-#ifndef MEMDEBUG
-    static char *sym_pool = NULL;
-    static char *pool_ptr = NULL;
-#endif
     jl_sym_t *sym;
     size_t nb = symbol_nbytes(len);
 
@@ -445,17 +652,22 @@ static jl_sym_t *mk_symbol(const char *str, size_t len)
         jl_exceptionf(jl_argumenterror_type, "Symbol length exceeds maximum length");
     }
 
+    jl_taggedvalue_t *tag;
 #ifdef MEMDEBUG
-    sym = (jl_sym_t*)jl_valueof(malloc(nb));
+    tag = (jl_taggedvalue_t*)malloc(nb);
 #else
+    static char *sym_pool = NULL;
+    static char *pool_ptr = NULL;
     if (sym_pool == NULL || pool_ptr+nb > sym_pool+SYM_POOL_SIZE) {
         sym_pool = (char*)malloc(SYM_POOL_SIZE);
         pool_ptr = sym_pool;
     }
-    sym = (jl_sym_t*)jl_valueof(pool_ptr);
+    tag = (jl_taggedvalue_t*)pool_ptr;
     pool_ptr += nb;
 #endif
-    jl_set_typeof(sym, jl_sym_type);
+    sym = (jl_sym_t*)jl_valueof(tag);
+    // set to old marked since we don't need write barrier on it.
+    tag->header = ((uintptr_t)jl_sym_type) | GC_OLD_MARKED;
     sym->left = sym->right = NULL;
     sym->hash = hash_symbol(str, len);
     memcpy(jl_symbol_name(sym), str, len);
@@ -496,15 +708,15 @@ static jl_sym_t *_jl_symbol(const char *str, size_t len)
     jl_sym_t *volatile *slot;
     jl_sym_t *node = symtab_lookup(&symtab, str, len, &slot);
     if (node == NULL) {
-        JL_LOCK(symbol_table); // Might GC
+        JL_LOCK(&symbol_table_lock); // Might GC
         // Someone might have updated it, check and look up again
         if (*slot != NULL && (node = symtab_lookup(slot, str, len, &slot))) {
-            JL_UNLOCK(symbol_table);
+            JL_UNLOCK(&symbol_table_lock); // Might GC
             return node;
         }
         node = mk_symbol(str, len);
         jl_atomic_store_release(slot, node);
-        JL_UNLOCK(symbol_table);
+        JL_UNLOCK(&symbol_table_lock); // Might GC
     }
     return node;
 }
@@ -537,7 +749,7 @@ void jl_set_gs_ctr(uint32_t ctr) { gs_ctr = ctr; }
 
 JL_DLLEXPORT jl_sym_t *jl_gensym(void)
 {
-    static char name[16];
+    char name[16];
     char *n;
     n = uint2str(&name[2], sizeof(name)-2, gs_ctr, 10);
     *(--n) = '#'; *(--n) = '#';
@@ -547,7 +759,7 @@ JL_DLLEXPORT jl_sym_t *jl_gensym(void)
 
 JL_DLLEXPORT jl_sym_t *jl_tagged_gensym(const char *str, int32_t len)
 {
-    static char gs_name[14];
+    char gs_name[14];
     if (symbol_nbytes(len) >= SYM_POOL_SIZE)
         jl_exceptionf(jl_argumenterror_type, "Symbol length exceeds maximum");
     if (memchr(str, 0, len))
@@ -587,10 +799,8 @@ JL_DLLEXPORT jl_methtable_t *jl_new_method_table(jl_sym_t *name, jl_module_t *mo
     jl_set_typeof(mt, jl_methtable_type);
     mt->name = jl_demangle_typename(name);
     mt->module = module;
-    mt->defs = (jl_methlist_t*)jl_nothing;
-    mt->cache = (jl_methlist_t*)jl_nothing;
-    mt->cache_arg1 = (jl_array_t*)jl_nothing;
-    mt->cache_targ = (jl_array_t*)jl_nothing;
+    mt->defs.unknown = jl_nothing;
+    mt->cache.unknown = jl_nothing;
     mt->max_args = 0;
     mt->kwsorter = NULL;
 #ifdef JL_GF_PROFILE
@@ -644,13 +854,59 @@ JL_DLLEXPORT jl_datatype_t *jl_new_uninitialized_datatype(size_t nfields, int8_t
     t->haspadding = 0;
     t->pointerfree = 0;
     t->depth = 0;
+    t->hastypevars = 0;
+    t->haswildcard = 0;
+    t->isleaftype = 1;
     return t;
+}
+
+// Determine if homogeneous tuple with fields of type t will have
+// a special alignment beyond normal Julia rules.
+// Return special alignment if one exists, 0 if normal alignment rules hold.
+// A non-zero result *must* match the LLVM rules for a vector type <nfields x t>.
+// For sake of Ahead-Of-Time (AOT) compilation, this routine has to work
+// without LLVM being available.
+unsigned jl_special_vector_alignment(size_t nfields, jl_value_t *t) {
+    if (!jl_is_vecelement_type(t))
+        return 0;
+    // LLVM 3.7 and 3.8 either crash or generate wrong code for many
+    // SIMD vector sizes N. It seems the rule is that N can have at
+    // most 2 non-zero bits. (This is true at least for N<=100.) See
+    // also <https://llvm.org/bugs/show_bug.cgi?id=27708>.
+    size_t mask = nfields;
+    // See e.g.
+    // <https://graphics.stanford.edu/%7Eseander/bithacks.html> for an
+    // explanation of this bit-counting algorithm.
+    mask &= mask-1;             // clear least-significant 1 if present
+    mask &= mask-1;             // clear another 1
+    if (mask)
+        return 0;               // nfields has more than two 1s
+    assert(jl_datatype_nfields(t)==1);
+    jl_value_t *ty = jl_field_type(t, 0);
+    if (!jl_is_bitstype(ty))
+        // LLVM requires that a vector element be a primitive type.
+        // LLVM allows pointer types as vector elements, but until a
+        // motivating use case comes up for Julia, we reject pointers.
+        return 0;
+    size_t elsz = jl_datatype_size(ty);
+    if (elsz>8 || (1<<elsz & 0x116) == 0)
+        // Element size is not 1, 2, 4, or 8.
+        return 0;
+    size_t size = nfields*elsz;
+    // LLVM's alignment rule for vectors seems to be to round up to
+    // a power of two, even if that's overkill for the target hardware.
+    size_t alignment=1;
+    for( ; size>alignment; alignment*=2 )
+        continue;
+    return alignment;
 }
 
 void jl_compute_field_offsets(jl_datatype_t *st)
 {
     size_t sz = 0, alignm = 1;
     int ptrfree = 1;
+    int homogeneous = 1;
+    jl_value_t *lastty = NULL;
 
     assert(0 <= st->fielddesc_type && st->fielddesc_type <= 2);
 
@@ -687,11 +943,20 @@ void jl_compute_field_offsets(jl_datatype_t *st)
             if (al > alignm)
                 alignm = al;
         }
+        homogeneous &= lastty==NULL || lastty==ty;
+        lastty = ty;
         jl_field_setoffset(st, i, sz);
         jl_field_setsize(st, i, fsz);
         if (__unlikely(max_offset - sz < fsz))
             jl_throw(jl_overflow_exception);
         sz += fsz;
+    }
+    if (homogeneous && lastty!=NULL && jl_is_tuple_type(st)) {
+        // Some tuples become LLVM vectors with stronger alignment than what was calculated above.
+        unsigned al = jl_special_vector_alignment(jl_datatype_nfields(st), lastty);
+        assert(al % alignm == 0);
+        if (al)
+            alignm = al;
     }
     st->alignment = alignm;
     st->size = LLT_ALIGN(sz, alignm);
@@ -768,6 +1033,7 @@ JL_DLLEXPORT jl_datatype_t *jl_new_datatype(jl_sym_t *name, jl_datatype_t *super
         t->name->primary = (jl_value_t*)t;
         jl_gc_wb(t->name, t);
     }
+    jl_precompute_memoized_dt(t);
 
     if (abstract || jl_svec_len(parameters) > 0) {
         t->uid = 0;
@@ -796,13 +1062,21 @@ JL_DLLEXPORT jl_datatype_t *jl_new_bitstype(jl_value_t *name, jl_datatype_t *sup
 
 // type constructor -----------------------------------------------------------
 
-jl_typector_t *jl_new_type_ctor(jl_svec_t *params, jl_value_t *body)
+JL_DLLEXPORT jl_value_t *jl_new_type_constructor(jl_svec_t *p, jl_value_t *body)
 {
-    jl_typector_t *tc = (jl_typector_t*)newobj((jl_value_t*)jl_typector_type,NWORDS(sizeof(jl_typector_t)));
-    tc->parameters = params;
+#ifndef NDEBUG
+    size_t i, np = jl_svec_len(p);
+    for (i = 0; i < np; i++) {
+        jl_tvar_t *tv = (jl_tvar_t*)jl_svecref(p, i);
+        assert(jl_is_typevar(tv) && !tv->bound);
+    }
+#endif
+    jl_typector_t *tc = (jl_typector_t*)newobj((jl_value_t*)jl_typector_type, NWORDS(sizeof(jl_typector_t)));
+    tc->parameters = p;
     tc->body = body;
-    return (jl_typector_t*)tc;
+    return (jl_value_t*)tc;
 }
+
 
 // bits constructors ----------------------------------------------------------
 
@@ -844,7 +1118,6 @@ UNBOX_FUNC(bool,   int8_t)
 UNBOX_FUNC(float32, float)
 UNBOX_FUNC(float64, double)
 UNBOX_FUNC(voidpointer, void*)
-UNBOX_FUNC(gensym, ssize_t)
 
 #define BOX_FUNC(typ,c_type,pfx,nw)                         \
     JL_DLLEXPORT jl_value_t *pfx##_##typ(c_type x)          \
@@ -892,7 +1165,8 @@ SIBOX_FUNC(int32,  int32_t, 1)
 UIBOX_FUNC(uint16, uint16_t, 1)
 UIBOX_FUNC(uint32, uint32_t, 1)
 UIBOX_FUNC(char,   uint32_t, 1)
-UIBOX_FUNC(gensym, size_t, 1)
+UIBOX_FUNC(ssavalue, size_t, 1)
+UIBOX_FUNC(slotnumber, size_t, 1)
 #ifdef _P64
 SIBOX_FUNC(int64,  int64_t, 1)
 UIBOX_FUNC(uint64, uint64_t, 1)
@@ -919,9 +1193,11 @@ void jl_init_int32_int64_cache(void)
         boxed_int32_cache[i]  = jl_box32(jl_int32_type, i-NBOX_C/2);
         boxed_int64_cache[i]  = jl_box64(jl_int64_type, i-NBOX_C/2);
 #ifdef _P64
-        boxed_gensym_cache[i] = jl_box64(jl_gensym_type, i);
+        boxed_ssavalue_cache[i] = jl_box64(jl_ssavalue_type, i);
+        boxed_slotnumber_cache[i] = jl_box64(jl_slotnumber_type, i);
 #else
-        boxed_gensym_cache[i] = jl_box32(jl_gensym_type, i);
+        boxed_ssavalue_cache[i] = jl_box32(jl_ssavalue_type, i);
+        boxed_slotnumber_cache[i] = jl_box32(jl_slotnumber_type, i);
 #endif
     }
     for(i=0; i < 256; i++) {
@@ -959,7 +1235,8 @@ void jl_mark_box_caches(void)
         jl_gc_setmark(boxed_uint32_cache[i]);
         jl_gc_setmark(boxed_char_cache[i]);
         jl_gc_setmark(boxed_uint64_cache[i]);
-        jl_gc_setmark(boxed_gensym_cache[i]);
+        jl_gc_setmark(boxed_ssavalue_cache[i]);
+        jl_gc_setmark(boxed_slotnumber_cache[i]);
     }
 }
 
@@ -974,7 +1251,7 @@ JL_DLLEXPORT jl_value_t *jl_box_bool(int8_t x)
 
 jl_expr_t *jl_exprn(jl_sym_t *head, size_t n)
 {
-    jl_array_t *ar = n==0 ? (jl_array_t*)jl_an_empty_cell : jl_alloc_cell_1d(n);
+    jl_array_t *ar = n==0 ? (jl_array_t*)jl_an_empty_vec_any : jl_alloc_vec_any(n);
     JL_GC_PUSH1(&ar);
     jl_expr_t *ex = (jl_expr_t*)jl_gc_alloc_3w(); assert(NWORDS(sizeof(jl_expr_t))==3);
     jl_set_typeof(ex, jl_expr_type);
@@ -989,10 +1266,10 @@ JL_CALLABLE(jl_f__expr)
 {
     JL_NARGSV(Expr, 1);
     JL_TYPECHK(Expr, symbol, args[0]);
-    jl_array_t *ar = jl_alloc_cell_1d(nargs-1);
+    jl_array_t *ar = jl_alloc_vec_any(nargs-1);
     JL_GC_PUSH1(&ar);
     for(size_t i=0; i < nargs-1; i++)
-        jl_cellset(ar, i, args[i+1]);
+        jl_array_ptr_set(ar, i, args[i+1]);
     jl_expr_t *ex = (jl_expr_t*)jl_gc_alloc_3w(); assert(NWORDS(sizeof(jl_expr_t))==3);
     jl_set_typeof(ex, jl_expr_type);
     ex->head = (jl_sym_t*)args[0];

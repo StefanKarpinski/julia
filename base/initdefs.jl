@@ -2,8 +2,21 @@
 
 ## initdefs.jl - initialization and runtime management definitions
 
-PROGRAM_FILE = UTF8String("")
-const ARGS = UTF8String[]
+"""
+    PROGRAM_FILE
+
+A string containing the script name passed to Julia from the command line. Note that the
+script name remains unchanged from within included files. Alternatively see
+[`@__FILE__`](:data:`@__FILE__`).
+"""
+PROGRAM_FILE = ""
+
+"""
+    ARGS
+
+An array of the command line arguments passed to Julia, as strings.
+"""
+const ARGS = String[]
 
 exit(n) = ccall(:jl_exit, Void, (Int32,), n)
 exit() = exit(0)
@@ -14,23 +27,29 @@ const roottask = current_task()
 is_interactive = false
 isinteractive() = (is_interactive::Bool)
 
-const LOAD_PATH = ByteString[]
-const LOAD_CACHE_PATH = ByteString[]
+"""
+    LOAD_PATH
+
+An array of paths (as strings) where the `require` function looks for code.
+"""
+const LOAD_PATH = String[]
+
+const LOAD_CACHE_PATH = String[]
 function init_load_path()
     vers = "v$(VERSION.major).$(VERSION.minor)"
-    if haskey(ENV,"JULIA_LOAD_PATH")
-        prepend!(LOAD_PATH, split(ENV["JULIA_LOAD_PATH"], @windows? ';' : ':'))
+    if haskey(ENV, "JULIA_LOAD_PATH")
+        prepend!(LOAD_PATH, split(ENV["JULIA_LOAD_PATH"], @static is_windows() ? ';' : ':'))
     end
-    push!(LOAD_PATH,abspath(JULIA_HOME,"..","local","share","julia","site",vers))
-    push!(LOAD_PATH,abspath(JULIA_HOME,"..","share","julia","site",vers))
-    push!(LOAD_CACHE_PATH,abspath(JULIA_HOME,"..","usr","lib","julia")) #TODO: fixme
+    push!(LOAD_PATH, abspath(JULIA_HOME, "..", "local", "share", "julia", "site", vers))
+    push!(LOAD_PATH, abspath(JULIA_HOME, "..", "share", "julia", "site", vers))
+    #push!(LOAD_CACHE_PATH, abspath(JULIA_HOME, "..", "lib", "julia")) #TODO: add a builtin location?
 end
 
 # initialize the local proc network address / port
 function init_bind_addr()
     opts = JLOptions()
     if opts.bindto != C_NULL
-        bind_to = split(bytestring(opts.bindto), ":")
+        bind_to = split(unsafe_string(opts.bindto), ":")
         bind_addr = string(parse(IPAddr, bind_to[1]))
         if length(bind_to) > 1
             bind_port = parse(Int,bind_to[2])
@@ -57,11 +76,18 @@ function early_init()
     # make sure OpenBLAS does not set CPU affinity (#1070, #9639)
     ENV["OPENBLAS_MAIN_FREE"] = get(ENV, "OPENBLAS_MAIN_FREE",
                                     get(ENV, "GOTOBLAS_MAIN_FREE", "1"))
-    if CPU_CORES > 8 && !("OPENBLAS_NUM_THREADS" in keys(ENV)) && !("OMP_NUM_THREADS" in keys(ENV))
+    if Sys.CPU_CORES > 8 && !("OPENBLAS_NUM_THREADS" in keys(ENV)) && !("OMP_NUM_THREADS" in keys(ENV))
         # Prevent openblas from starting too many threads, unless/until specifically requested
         ENV["OPENBLAS_NUM_THREADS"] = 8
     end
 end
+
+"""
+    JULIA_HOME
+
+A string containing the full path to the directory containing the `julia` executable.
+"""
+:JULIA_HOME
 
 function init_parallel()
     start_gc_msgs_task()
@@ -73,6 +99,7 @@ function init_parallel()
     global PGRP
     global LPROC
     LPROC.id = 1
+    cluster_cookie(randstring(HDR_COOKIE_LEN))
     assert(isempty(PGRP.workers))
     register_worker(LPROC)
 end

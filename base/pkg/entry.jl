@@ -102,7 +102,7 @@ function available(pkg::AbstractString)
 end
 
 function installed()
-    pkgs = Dict{ASCIIString,VersionNumber}()
+    pkgs = Dict{String,VersionNumber}()
     for (pkg,(ver,fix)) in Read.installed()
         pkgs[pkg] = ver
     end
@@ -267,10 +267,10 @@ end
 function free(pkgs)
     try
         for pkg in pkgs
-            ispath(pkg,".git") || error("$pkg is not a git repo")
-            Read.isinstalled(pkg) || error("$pkg cannot be freed – not an installed package")
+            ispath(pkg,".git") || throw(PkgError("$pkg is not a git repo"))
+            Read.isinstalled(pkg) || throw(PkgError("$pkg cannot be freed – not an installed package"))
             avail = Read.available(pkg)
-            isempty(avail) && error("$pkg cannot be freed – not a registered package")
+            isempty(avail) && throw(PkgError("$pkg cannot be freed – not a registered package"))
             with(GitRepo, pkg) do repo
                 LibGit2.isdirty(repo) && throw(PkgError("$pkg cannot be freed – repo is dirty"))
                 info("Freeing $pkg")
@@ -283,7 +283,7 @@ function free(pkgs)
                 end
             end
             isempty(Cache.prefetch(pkg, Read.url(pkg), [a.sha1 for (v,a)=avail])) && continue
-            error("can't find any registered versions of $pkg to checkout")
+            throw(PkgError("Can't find any registered versions of $pkg to checkout"))
         end
     finally
         resolve()
@@ -328,41 +328,56 @@ end
 function update(branch::AbstractString)
     info("Updating METADATA...")
     with(GitRepo, "METADATA") do repo
-        with(LibGit2.head(repo)) do h
-            if LibGit2.branch(h) != branch
-                if LibGit2.isdirty(repo)
-                    throw(PkgError("METADATA is dirty and not on $branch, bailing"))
+        try
+            with(LibGit2.head(repo)) do h
+                if LibGit2.branch(h) != branch
+                    if LibGit2.isdirty(repo)
+                        throw(PkgError("METADATA is dirty and not on $branch, bailing"))
+                    end
+                    if !LibGit2.isattached(repo)
+                        throw(PkgError("METADATA is detached not on $branch, bailing"))
+                    end
+                    LibGit2.fetch(repo)
+                    LibGit2.checkout_head(repo)
+                    LibGit2.branch!(repo, branch, track="refs/remotes/origin/$branch")
+                    LibGit2.merge!(repo)
                 end
-                if !LibGit2.isattached(repo)
-                    throw(PkgError("METADATA is detached not on $branch, bailing"))
-                end
-                LibGit2.fetch(repo)
-                LibGit2.checkout_head(repo)
-                LibGit2.branch!(repo, branch, track="refs/remotes/origin/$branch")
-                LibGit2.merge!(repo)
             end
-        end
-        LibGit2.fetch(repo)
-        ff_succeeded = LibGit2.merge!(repo, fastforward=true)
-        if !ff_succeeded
-            LibGit2.rebase!(repo, "origin/$branch")
+
+            LibGit2.fetch(repo)
+            ff_succeeded = LibGit2.merge!(repo, fastforward=true)
+            if !ff_succeeded
+                LibGit2.rebase!(repo, "origin/$branch")
+            end
+        catch err
+            cex = CapturedException(err, catch_backtrace())
+            throw(PkgError("METADATA cannot be updated. Resolve problems manually in $(Pkg.dir("METADATA")).", cex))
         end
     end
+    deferred_errors = CompositeException()
     avail = Read.available()
     # this has to happen before computing free/fixed
     for pkg in filter(Read.isinstalled, collect(keys(avail)))
         try
             Cache.prefetch(pkg, Read.url(pkg), [a.sha1 for (v,a)=avail[pkg]])
         catch err
-            warn("Package $pkg: unable to update cache\n$(err.msg)")
+            cex = CapturedException(err, catch_backtrace())
+            push!(deferred_errors, PkgError("Package $pkg: unable to update cache.", cex))
         end
     end
     instd = Read.installed(avail)
     free  = Read.free(instd)
     for (pkg,ver) in free
-        Cache.prefetch(pkg, Read.url(pkg), [a.sha1 for (v,a) in avail[pkg]])
+        try
+            Cache.prefetch(pkg, Read.url(pkg), [a.sha1 for (v,a)=avail[pkg]])
+        catch err
+            cex = CapturedException(err, catch_backtrace())
+            push!(deferred_errors, PkgError("Package $pkg: unable to update cache.", cex))
+        end
     end
+    creds = LibGit2.CachedCredentials()
     fixed = Read.fixed(avail,instd)
+    stopupdate = false
     for (pkg,ver) in fixed
         ispath(pkg,".git") || continue
         with(GitRepo, pkg) do repo
@@ -373,27 +388,31 @@ function update(branch::AbstractString)
                     prev_sha = string(LibGit2.head_oid(repo))
                     success = true
                     try
-                        LibGit2.fetch(repo)
+                        LibGit2.fetch(repo, payload = Nullable(creds))
+                        LibGit2.reset!(creds)
                         LibGit2.merge!(repo, fastforward=true)
                     catch err
-                        show(err)
-                        print('\n')
+                        cex = CapturedException(err, catch_backtrace())
+                        push!(deferred_errors, PkgError("Package $pkg cannot be updated.", cex))
                         success = false
+                        stopupdate = isa(err, InterruptException)
                     end
                     if success
                         post_sha = string(LibGit2.head_oid(repo))
                         branch = LibGit2.branch(repo)
                         info("Updating $pkg $branch...",
-                              prev_sha != post_sha ? " $(prev_sha[1:8]) → $(post_sha[1:8])" : "")
+                            prev_sha != post_sha ? " $(prev_sha[1:8]) → $(post_sha[1:8])" : "")
                     end
                 end
             end
         end
+        stopupdate && break
         if haskey(avail,pkg)
             try
                 Cache.prefetch(pkg, Read.url(pkg), [a.sha1 for (v,a)=avail[pkg]])
             catch err
-                warn("Package $pkg: unable to update cache\n$(err.msg)")
+                cex = CapturedException(err, catch_backtrace())
+                push!(deferred_errors, PkgError("Package $pkg: unable to update cache.", cex))
             end
         end
     end
@@ -401,6 +420,10 @@ function update(branch::AbstractString)
     resolve(Reqs.parse("REQUIRE"), avail, instd, fixed, free)
     # Don't use instd here since it may have changed
     updatehook(sort!(collect(keys(installed()))))
+
+    # Print deferred errors
+    length(deferred_errors) > 0 && throw(PkgError("Update finished with errors.", deferred_errors))
+    nothing
 end
 
 
@@ -438,7 +461,7 @@ function resolve(
     # prefetch phase isolates network activity, nothing to roll back
     missing = []
     for (pkg,(ver1,ver2)) in changes
-        vers = ASCIIString[]
+        vers = String[]
         ver1 !== nothing && push!(vers,LibGit2.head(pkg))
         ver2 !== nothing && push!(vers,Read.sha1(pkg,ver2))
         append!(missing,
@@ -501,9 +524,9 @@ end
 function build!(pkgs::Vector, buildstream::IO, seen::Set)
     for pkg in pkgs
         pkg == "julia" && continue
-        pkg in seen && continue
-        build!(Read.requires_list(pkg),buildstream,push!(seen,pkg))
+        pkg in seen ? continue : push!(seen,pkg)
         Read.isinstalled(pkg) || throw(PkgError("$pkg is not an installed package"))
+        build!(Read.requires_list(pkg),buildstream,seen)
         path = abspath(pkg,"deps","build.jl")
         isfile(path) || continue
         println(buildstream, path) # send to build process for evalfile
@@ -560,8 +583,8 @@ function build!(pkgs::Vector, errs::Dict, seen::Set=Set())
             end
         end
     catch err
-        kill(pobj)
         close(io)
+        isa(err, PkgError) ? wait(pobj) : kill(pobj)
         rethrow(err)
     finally
         isfile(errfile) && Base.rm(errfile)
@@ -574,10 +597,10 @@ function build(pkgs::Vector)
     isempty(errs) && return
     println(STDERR)
     warnbanner(label="[ BUILD ERRORS ]", """
-    WARNING: $(join(map(x->x[1],errs),", "," and ")) had build errors.
+    WARNING: $(join(keys(errs),", "," and ")) had build errors.
 
      - packages with build errors remain installed in $(pwd())
-     - build the package(s) and all dependencies with `Pkg.build("$(join(map(x->x[1],errs),"\", \""))")`
+     - build the package(s) and all dependencies with `Pkg.build("$(join(keys(errs),"\", \""))")`
      - build a single package by running its `deps/build.jl` script
     """)
 end
@@ -606,7 +629,7 @@ function updatehook(pkgs::Vector)
     isempty(errs) && return
     println(STDERR)
     warnbanner(label="[ UPDATE ERRORS ]", """
-    WARNING: $(join(map(x->x[1],errs),", "," and ")) had update errors.
+    WARNING: $(join(keys(errs),", "," and ")) had update errors.
 
      - Unrelated packages are unaffected
      - To retry, run Pkg.update() again

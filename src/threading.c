@@ -88,31 +88,44 @@ JL_DLLEXPORT JL_CONST_FUNC jl_tls_states_t *(jl_get_ptls_states)(void)
 
 // thread ID
 JL_DLLEXPORT int jl_n_threads;     // # threads we're actually using
-jl_thread_task_state_t *jl_all_task_states;
+jl_tls_states_t **jl_all_tls_states;
 
 // return calling thread's ID
 // Also update the suspended_threads list in signals-mach when changing the
 // type of the thread id.
 JL_DLLEXPORT int16_t jl_threadid(void) { return ti_tid; }
 
-struct _jl_thread_heap_t *jl_mk_thread_heap(void);
-// must be called by each thread at startup
-
 static void ti_initthread(int16_t tid)
 {
     jl_tls_states_t *ptls = jl_get_ptls_states();
+#ifndef _OS_WINDOWS_
+    ptls->system_id = pthread_self();
+#endif
     ptls->tid = tid;
     ptls->pgcstack = NULL;
     ptls->gc_state = 0; // GC unsafe
+    // Conditionally initialize the safepoint address. See comment in
+    // `safepoint.c`
+    if (tid == 0) {
+        ptls->safepoint = (size_t*)(jl_safepoint_pages + jl_page_size);
+    }
+    else {
+        ptls->safepoint = (size_t*)(jl_safepoint_pages + jl_page_size * 2 +
+                                    sizeof(size_t));
+    }
+    ptls->defer_signal = 0;
     ptls->current_module = NULL;
-#ifdef JULIA_ENABLE_THREADING
-    jl_all_heaps[tid] = jl_mk_thread_heap();
-#else
-    jl_mk_thread_heap();
-#endif
+    void *bt_data = malloc(sizeof(uintptr_t) * (JL_MAX_BT_SIZE + 1));
+    if (bt_data == NULL) {
+        jl_printf(JL_STDERR, "could not allocate backtrace buffer\n");
+        gc_debug_critical_error();
+        abort();
+    }
+    ptls->bt_data = (uintptr_t*)bt_data;
+    jl_mk_thread_heap(&ptls->heap);
+    jl_install_thread_signal_handler();
 
-    jl_all_task_states[tid].ptls = ptls;
-    jl_all_task_states[tid].signal_stack = jl_install_thread_signal_handler();
+    jl_all_tls_states[tid] = ptls;
 }
 
 static void ti_init_master_thread(void)
@@ -124,9 +137,6 @@ static void ti_init_master_thread(void)
         jl_printf(JL_STDERR, "WARNING: failed to access handle to main thread\n");
         hMainThread = INVALID_HANDLE_VALUE;
     }
-    jl_all_task_states[0].system_id = hMainThread;
-#else
-    jl_all_task_states[0].system_id = pthread_self();
 #endif
     ti_initthread(0);
 }
@@ -145,19 +155,16 @@ static jl_value_t *ti_run_fun(jl_svec_t *args)
 
 
 // lock for code generation
-JL_DEFINE_MUTEX(codegen)
-JL_DEFINE_MUTEX(typecache)
+jl_mutex_t codegen_lock;
+jl_mutex_t typecache_lock;
 
 #ifdef JULIA_ENABLE_THREADING
 
-// thread heap
-struct _jl_thread_heap_t **jl_all_heaps;
-
 // only one thread group for now
-ti_threadgroup_t *tgworld;
+static ti_threadgroup_t *tgworld;
 
 // for broadcasting work to threads
-ti_threadwork_t threadwork;
+static ti_threadwork_t threadwork;
 
 #if PROFILE_JL_THREADING
 uint64_t prep_ns;
@@ -265,17 +272,17 @@ void jl_init_threading(void)
 
     // how many threads available, usable
     int max_threads = jl_cpu_cores();
-    jl_n_threads = DEFAULT_NUM_THREADS;
+    jl_n_threads = JULIA_NUM_THREADS;
     cp = getenv(NUM_THREADS_NAME);
     if (cp) {
         jl_n_threads = (uint64_t)strtol(cp, NULL, 10);
     }
     if (jl_n_threads > max_threads)
         jl_n_threads = max_threads;
+    if (jl_n_threads <= 0)
+        jl_n_threads = 1;
 
-    // set up space for per-thread heaps
-    jl_all_heaps = (struct _jl_thread_heap_t **)malloc(jl_n_threads * sizeof(void*));
-    jl_all_task_states = (jl_thread_task_state_t *)malloc(jl_n_threads * sizeof(jl_thread_task_state_t));
+    jl_all_tls_states = (jl_tls_states_t**)malloc(jl_n_threads * sizeof(void*));
 
 #if PROFILE_JL_THREADING
     // set up space for profiling information
@@ -328,7 +335,6 @@ void jl_start_threads(void)
             uv_thread_setaffinity(&uvtid, mask, NULL, UV_CPU_SETSIZE);
         }
         uv_thread_detach(&uvtid);
-        jl_all_task_states[i + 1].system_id = uvtid;
     }
 
     // set up the world thread group
@@ -362,8 +368,6 @@ void jl_shutdown_threading(void)
 
     // destroy the world thread group
     ti_threadgroup_destroy(tgworld);
-
-    // TODO: clean up and free the per-thread heaps
 
 #if PROFILE_JL_THREADING
     jl_free_aligned(join_ns);
@@ -503,8 +507,8 @@ JL_DLLEXPORT jl_value_t *jl_threading_run(jl_svec_t *args)
 
 void jl_init_threading(void)
 {
-    static jl_thread_task_state_t _jl_all_task_states;
-    jl_all_task_states = &_jl_all_task_states;
+    static jl_tls_states_t *_jl_all_tls_states;
+    jl_all_tls_states = &_jl_all_tls_states;
     jl_n_threads = 1;
 
 #if defined(__linux__) && defined(JL_USE_INTEL_JITEVENTS)

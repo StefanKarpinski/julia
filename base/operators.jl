@@ -8,9 +8,22 @@ supertype(T::DataType) = T.super
 
 ## generic comparison ##
 
-==(x,y) = x === y
-
+==(x, y) = x === y
 isequal(x, y) = x == y
+
+## minimally-invasive changes to test == causing NotComparableError
+# export NotComparableError
+# =={T}(x::T, y::T) = x === y
+# immutable NotComparableError <: Exception end
+# const NotComparable = NotComparableError()
+# ==(x::ANY, y::ANY) = NotComparable
+# !(e::NotComparableError) = throw(e)
+# isequal(x, y) = (x == y) === true
+
+## alternative NotComparableError which captures context
+# immutable NotComparableError; a; b; end
+# ==(x::ANY, y::ANY) = NotComparableError(x, y)
+
 isequal(x::AbstractFloat, y::AbstractFloat) = (isnan(x) & isnan(y)) | (signbit(x) == signbit(y)) & (x == y)
 isequal(x::Real,          y::AbstractFloat) = (isnan(x) & isnan(y)) | (signbit(x) == signbit(y)) & (x == y)
 isequal(x::AbstractFloat, y::Real         ) = (isnan(x) & isnan(y)) | (signbit(x) == signbit(y)) & (x == y)
@@ -19,8 +32,16 @@ isless(x::AbstractFloat, y::AbstractFloat) = (!isnan(x) & isnan(y)) | (signbit(x
 isless(x::Real,          y::AbstractFloat) = (!isnan(x) & isnan(y)) | (signbit(x) & !signbit(y)) | (x < y)
 isless(x::AbstractFloat, y::Real         ) = (!isnan(x) & isnan(y)) | (signbit(x) & !signbit(y)) | (x < y)
 
-=={T}(::Type{T}, ::Type{T}) = true  # encourage more specialization on types (see #11425)
-==(T::Type, S::Type)        = typeseq(T, S)
+function ==(T::Type, S::Type)
+    @_pure_meta
+    typeseq(T, S)
+end
+function !=(T::Type, S::Type)
+    @_pure_meta
+    !(T == S)
+end
+==(T::TypeVar, S::Type) = false
+==(T::Type, S::TypeVar) = false
 
 ## comparison fallbacks ##
 
@@ -70,6 +91,8 @@ scalarmin(x::AbstractArray, y               ) = throw(ArgumentError("ordering is
 
 ## definitions providing basic traits of arithmetic operators ##
 
+identity(x) = x
+
 +(x::Number) = x
 *(x::Number) = x
 (&)(x::Integer) = x
@@ -88,19 +111,12 @@ function afoldl(op,a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,qs...)
     y
 end
 
-immutable ElementwiseMaxFun end
-(::ElementwiseMaxFun)(x, y) = max(x,y)
-
-immutable ElementwiseMinFun end
-(::ElementwiseMinFun)(x, y) = min(x, y)
-
-for (op,F) in ((:+,:(AddFun())), (:*,:(MulFun())), (:&,:(AndFun())), (:|,:(OrFun())),
-               (:$,:(XorFun())), (:min,:(ElementwiseMinFun())), (:max,:(ElementwiseMaxFun())), (:kron,:kron))
+for op in (:+, :*, :&, :|, :$, :min, :max, :kron)
     @eval begin
         # note: these definitions must not cause a dispatch loop when +(a,b) is
         # not defined, and must only try to call 2-argument definitions, so
         # that defining +(a,b) is sufficient for full functionality.
-        ($op)(a, b, c, xs...) = afoldl($F, ($op)(($op)(a,b),c), xs...)
+        ($op)(a, b, c, xs...) = afoldl($op, ($op)(($op)(a,b),c), xs...)
         # a further concern is that it's easy for a type like (Int,Int...)
         # to match many definitions, so we need to keep the number of
         # definitions down to avoid losing type information.
@@ -116,8 +132,8 @@ end
 .^(x::Number,y::Number) = x^y
 .+(x::Number,y::Number) = x+y
 .-(x::Number,y::Number) = x-y
-.<<(x::Number,y::Number) = x<<y
-.>>(x::Number,y::Number) = x>>y
+.<<(x::Integer,y::Integer) = x<<y
+.>>(x::Integer,y::Integer) = x>>y
 
 .==(x::Number,y::Number) = x == y
 .!=(x::Number,y::Number) = x != y
@@ -149,13 +165,13 @@ julia> bits(Int8(12))
 ```
 See also [`>>`](:func:`>>`), [`>>>`](:func:`>>>`).
 """
-function <<(x, c::Integer)
+function <<(x::Integer, c::Integer)
     typemin(Int) <= c <= typemax(Int) && return x << (c % Int)
     (x >= 0 || c >= 0) && return zero(x)
     oftype(x, -1)
 end
-<<(x, c::Unsigned) = c <= typemax(UInt) ? x << (c % UInt) : zero(x)
-<<(x, c::Int) = c >= 0 ? x << unsigned(c) : x >> unsigned(-c)
+<<(x::Integer, c::Unsigned) = c <= typemax(UInt) ? x << (c % UInt) : zero(x)
+<<(x::Integer, c::Int) = c >= 0 ? x << unsigned(c) : x >> unsigned(-c)
 
 """
     >>(x, n)
@@ -187,13 +203,13 @@ julia> bits(Int8(-4))
 ```
 See also [`>>>`](:func:`>>>`), [`<<`](:func:`<<`).
 """
-function >>(x, c::Integer)
+function >>(x::Integer, c::Integer)
     typemin(Int) <= c <= typemax(Int) && return x >> (c % Int)
     (x >= 0 || c < 0) && return zero(x)
     oftype(x, -1)
 end
->>(x, c::Unsigned) = c <= typemax(UInt) ? x >> (c % UInt) : zero(x)
->>(x, c::Int) = c >= 0 ? x >> unsigned(c) : x << unsigned(-c)
+>>(x::Integer, c::Unsigned) = c <= typemax(UInt) ? x >> (c % UInt) : zero(x)
+>>(x::Integer, c::Int) = c >= 0 ? x >> unsigned(c) : x << unsigned(-c)
 
 """
     >>>(x, n)
@@ -220,9 +236,10 @@ is equivalent to [`>>`](:func:`>>`).
 
 See also [`>>`](:func:`>>`), [`<<`](:func:`<<`).
 """
->>>(x, c::Integer) = typemin(Int) <= c <= typemax(Int) ? x >>> (c % Int) : zero(x)
->>>(x, c::Unsigned) = c <= typemax(UInt) ? x >>> (c % UInt) : zero(x)
->>>(x, c::Int) = c >= 0 ? x >>> unsigned(c) : x << unsigned(-c)
+>>>(x::Integer, c::Integer) =
+    typemin(Int) <= c <= typemax(Int) ? x >>> (c % Int) : zero(x)
+>>>(x::Integer, c::Unsigned) = c <= typemax(UInt) ? x >>> (c % UInt) : zero(x)
+>>>(x::Integer, c::Int) = c >= 0 ? x >>> unsigned(c) : x << unsigned(-c)
 
 # fallback div, fld, and cld implementations
 # NOTE: C89 fmod() and x87 FPREM implicitly provide truncating float division,
@@ -240,14 +257,39 @@ const % = rem
 const ÷ = div
 .÷(x::Real, y::Real) = x÷y
 
-# mod returns in [0,y) or (y,0] (for negative y),
-# whereas mod1 returns in (0,y] or [y,0)
+
+"""
+    mod1(x, y)
+
+Modulus after flooring division, returning a value `r` such that `mod(r, y) == mod(x, y)`
+ in the range ``(0, y]`` for positive `y` and in the range ``[y,0)`` for negative `y`.
+"""
 mod1{T<:Real}(x::T, y::T) = (m=mod(x,y); ifelse(m==0, y, m))
-fld1{T<:Real}(x::T, y::T) = (m=mod(x,y); fld(x-m,y))
-fldmod1{T<:Real}(x::T, y::T) = (fld1(x,y), mod1(x,y))
 # efficient version for integers
 mod1{T<:Integer}(x::T, y::T) = mod(x+y-T(1),y)+T(1)
+
+
+"""
+    fld1(x, y)
+
+Flooring division, returning a value consistent with `mod1(x,y)`
+
+```julia
+x == fld(x,y)*y + mod(x,y)
+x == (fld1(x,y)-1)*y + mod1(x,y)
+```
+"""
+fld1{T<:Real}(x::T, y::T) = (m=mod(x,y); fld(x-m,y))
+# efficient version for integers
 fld1{T<:Integer}(x::T, y::T) = fld(x+y-T(1),y)
+
+"""
+    fldmod1(x, y)
+
+Return `(fld1(x,y), mod1(x,y))`.
+"""
+fldmod1{T<:Real}(x::T, y::T) = (fld1(x,y), mod1(x,y))
+# efficient version for integers
 fldmod1{T<:Integer}(x::T, y::T) = (fld1(x,y), mod1(x,y))
 
 # transpose
@@ -285,10 +327,6 @@ eltype(::Type) = Any
 eltype(::Type{Any}) = Any
 eltype(t::DataType) = eltype(supertype(t))
 eltype(x) = eltype(typeof(x))
-
-# copying immutable things
-copy(x::Union{Symbol,Number,AbstractString,Function,Tuple,LambdaInfo,
-              TopNode,QuoteNode,DataType,Union}) = x
 
 # function pipelining
 |>(x, f) = f(x)
@@ -333,6 +371,23 @@ function promote_shape(a::Dims, b::Dims)
         end
     end
     return a
+end
+
+function promote_shape(a::AbstractArray, b::AbstractArray)
+    if ndims(a) < ndims(b)
+        return promote_shape(b, a)
+    end
+    for i=1:ndims(b)
+        if indices(a, i) != indices(b, i)
+            throw(DimensionMismatch("dimensions must match"))
+        end
+    end
+    for i=ndims(b)+1:ndims(a)
+        if indices(a, i) != 1:1
+            throw(DimensionMismatch("dimensions must match"))
+        end
+    end
+    return shape(a)
 end
 
 function throw_setindex_mismatch(X, I)
@@ -473,7 +528,7 @@ end
 macro vectorize_1arg(S,f)
     S = esc(S); f = esc(f); T = esc(:T)
     quote
-        ($f){$T<:$S}(x::AbstractArray{$T,1}) = [ ($f)(x[i]) for i=1:length(x) ]
+        ($f){$T<:$S}(x::AbstractArray{$T,1}) = [ ($f)(elem) for elem in x ]
         ($f){$T<:$S}(x::AbstractArray{$T,2}) =
             [ ($f)(x[i,j]) for i=1:size(x,1), j=1:size(x,2) ]
         ($f){$T<:$S}(x::AbstractArray{$T}) =
@@ -504,17 +559,17 @@ end
 
 function ifelse(c::AbstractArray{Bool}, x::AbstractArray, y::AbstractArray)
     shp = promote_shape(size(c), promote_shape(size(x), size(y)))
-    reshape([ifelse(c[i], x[i], y[i]) for i = 1 : length(c)], shp)
+    reshape([ifelse(c_elem, x_elem, y_elem) for (c_elem, x_elem, y_elem) in zip(c, x, y)], shp)
 end
 
 function ifelse(c::AbstractArray{Bool}, x::AbstractArray, y)
     shp = promote_shape(size(c), size(c))
-    reshape([ifelse(c[i], x[i], y) for i = 1 : length(c)], shp)
+    reshape([ifelse(c_elem, x_elem, y) for (c_elem, x_elem) in zip(c, x)], shp)
 end
 
 function ifelse(c::AbstractArray{Bool}, x, y::AbstractArray)
     shp = promote_shape(size(c), size(y))
-    reshape([ifelse(c[i], x, y[i]) for i = 1 : length(c)], shp)
+    reshape([ifelse(c_elem, x, y_elem) for (c_elem, y_elem) in zip(c, y)], shp)
 end
 
 # Pair

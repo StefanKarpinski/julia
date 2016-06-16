@@ -65,10 +65,51 @@ let X = [3  9   5;
     @test_throws ArgumentError diff(X,-1)
 end
 
-x = float([1:12;])
+# test linrange
+# make sure unequal input arrays throw an error
+x = [2; 5; 6]
+y = [3; 7; 10; 10]
+@test_throws DimensionMismatch linreg(x, y)
+x = [2 5 6]
+y = [3; 7; 10]
+@test_throws MethodError linreg(x, y)
+
+# check (UnitRange, Array)
+x = 1:12
 y = [5.5; 6.3; 7.6; 8.8; 10.9; 11.79; 13.48; 15.02; 17.77; 20.81; 22.0; 22.99]
-@test_approx_eq linreg(x,y) [2.5559090909090867, 1.6960139860139862]
-@test_approx_eq linreg(sub(x,1:6),sub(y,1:6)) [3.8366666666666642,1.3271428571428574]
+@test_approx_eq [linreg(x,y)...] [2.5559090909090867, 1.6960139860139862]
+@test_approx_eq [linreg(sub(x,1:6),sub(y,1:6))...] [3.8366666666666642,1.3271428571428574]
+
+# check (LinSpace, UnitRange)
+x = linspace(1.0, 12.0, 100)
+y = -100:-1
+@test_approx_eq [linreg(x, y)...] [-109.0, 9.0]
+
+# check (UnitRange, UnitRange)
+x = 1:12
+y = 12:-1:1
+@test_approx_eq [linreg(x, y)...] [13.0, -1.0]
+
+# check (LinSpace, LinSpace)
+x = linspace(-5, 10, 100)
+y = linspace(50, 200, 100)
+@test_approx_eq [linreg(x, y)...] [100.0, 10.0]
+
+# check (Array, Array)
+# Anscombe's quartet (https://en.wikipedia.org/wiki/Anscombe%27s_quartet)
+x123 = [10.0; 8.0; 13.0; 9.0; 11.0; 14.0; 6.0; 4.0; 12.0; 7.0; 5.0]
+y1 = [8.04; 6.95; 7.58; 8.81; 8.33; 9.96; 7.24; 4.26; 10.84; 4.82; 5.68]
+@test_approx_eq_eps [linreg(x123, y1)...] [3.0, 0.5] 10e-5
+
+y2 = [9.14; 8.14; 8.74; 8.77; 9.26; 8.10; 6.12; 3.10; 9.13; 7.26; 4.74]
+@test_approx_eq_eps [linreg(x123, y2)...] [3.0, 0.5] 10e-3
+
+y3 = [7.46; 6.77; 12.74; 7.11; 7.81; 8.84; 6.08; 5.39; 8.15; 6.42; 5.73]
+@test_approx_eq_eps [linreg(x123, y3)...] [3.0, 0.5] 10e-3
+
+x4 = [8.0; 8.0; 8.0; 8.0; 8.0; 8.0; 8.0; 19.0; 8.0; 8.0; 8.0]
+y4 = [6.58; 5.76; 7.71; 8.84; 8.47; 7.04; 5.25; 12.50; 5.56; 7.91; 6.89]
+@test_approx_eq_eps [linreg(x4, y4)...] [3.0, 0.5] 10e-3
 
 # test diag
 let A = eye(4)
@@ -131,7 +172,7 @@ let aa = reshape([1.:6;], (2,3))
         @test scale!(similar(a), [1.; 2.], a) == a.*[1; 2]
         @test scale!(similar(a), [1; 2], a) == a.*[1; 2]
         @test_throws DimensionMismatch scale!(similar(a), ones(3), a)
-        @test_throws DimensionMismatch scale!(Array(Float64, 3, 2), a, ones(3))
+        @test_throws DimensionMismatch scale!(Array{Float64}(3, 2), a, ones(3))
 
         if atype == "Array"
             @test scale!(similar(a), a, [1.; 2.; 3.]) == a.*[1 2 3]
@@ -177,6 +218,7 @@ for elty in [Float32,Float64,Complex64,Complex128]
     @test det(a) == a
 end
 
+@test rank([1.0 0.0; 0.0 0.9],0.95) == 1
 @test qr(big([0 1; 0 0]))[2] == [0 1; 0 0]
 
 @test norm([2.4e-322, 4.4e-323]) ≈ 2.47e-322
@@ -219,6 +261,7 @@ let
             @test norm(w - [0.6, 0.8], Inf) < eps(Tr)
             @test norm(w) == 1.0
             @test norm(normalize!(copy(v)) - w, Inf) < eps(Tr)
+            @test isempty(normalize!(T[]))
         end
     end
 end
@@ -237,3 +280,5 @@ end
 
 # Issue 14657
 @test det([true false; false true]) == det(eye(Int, 2))
+
+@test_throws ArgumentError Base.LinAlg.char_uplo(:Z)

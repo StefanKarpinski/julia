@@ -127,11 +127,11 @@ for T in (Range, BitArray, StridedArray, AbstractArray)
 end
 
 log(::Irrational{:e}) = 1 # use 1 to correctly promote expressions like log(x)/log(e)
-log(::Irrational{:e}, x) = log(x)
+log(::Irrational{:e}, x::Number) = log(x)
 
 # align along = for nice Array printing
 function alignment(io::IO, x::Irrational)
-    m = match(r"^(.*?)(=.*)$", sprint(0, showcompact_lim, x, env=io))
-    m === nothing ? (length(sprint(0, showcompact_lim, x, env=io)), 0) :
+    m = match(r"^(.*?)(=.*)$", sprint(0, showcompact, x, env=io))
+    m === nothing ? (length(sprint(0, showcompact, x, env=io)), 0) :
     (length(m.captures[1]), length(m.captures[2]))
 end

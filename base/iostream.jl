@@ -35,7 +35,6 @@ function flush(s::IOStream)
     bad = ccall(:ios_flush, Cint, (Ptr{Void},), s.ios) != 0
     sigatomic_end()
     systemerror("flush", bad)
-    s
 end
 iswritable(s::IOStream) = ccall(:ios_get_writable, Cint, (Ptr{Void},), s.ios)!=0
 isreadable(s::IOStream) = ccall(:ios_get_readable, Cint, (Ptr{Void},), s.ios)!=0
@@ -80,7 +79,7 @@ eof(s::IOStream) = ccall(:ios_eof_blocking, Cint, (Ptr{Void},), s.ios)!=0
 function fdio(name::AbstractString, fd::Integer, own::Bool=false)
     s = IOStream(name)
     ccall(:ios_fd, Ptr{Void}, (Ptr{Void}, Clong, Cint, Cint),
-          s.ios, fd, 0, own);
+          s.ios, fd, 0, own)
     return s
 end
 fdio(fd::Integer, own::Bool=false) = fdio(string("<fd ",fd,">"), fd, own)
@@ -181,7 +180,7 @@ end
 read(s::IOStream, ::Type{Char}) = Char(ccall(:jl_getutf8, UInt32, (Ptr{Void},), s.ios))
 
 takebuf_string(s::IOStream) =
-    ccall(:jl_takebuf_string, Any, (Ptr{Void},), s.ios)::ByteString
+    ccall(:jl_takebuf_string, Ref{String}, (Ptr{Void},), s.ios)
 
 takebuf_array(s::IOStream) =
     ccall(:jl_takebuf_array, Vector{UInt8}, (Ptr{Void},), s.ios)
@@ -242,19 +241,19 @@ function read(s::IOStream)
             sz -= pos
         end
     end
-    b = Array(UInt8, sz<=0 ? 1024 : sz)
+    b = Array{UInt8}(sz<=0 ? 1024 : sz)
     nr = readbytes_all!(s, b, typemax(Int))
     resize!(b, nr)
 end
 
 function read(s::IOStream, nb::Integer; all::Bool=true)
-    b = Array(UInt8, nb)
+    b = Array{UInt8}(nb)
     nr = readbytes!(s, b, nb, all=all)
     resize!(b, nr)
 end
 
 ## Character streams ##
-const _chtmp = Array(Char, 1)
+const _chtmp = Array{Char}(1)
 function peekchar(s::IOStream)
     if ccall(:ios_peekutf8, Cint, (Ptr{Void}, Ptr{Char}), s, _chtmp) < 0
         return Char(-1)

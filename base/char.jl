@@ -18,7 +18,7 @@ length(c::Char) = 1
 endof(c::Char) = 1
 getindex(c::Char) = c
 getindex(c::Char, i::Integer) = i == 1 ? c : throw(BoundsError())
-getindex(c::Char, I::Integer...) = all(EqX(1), I) ? c : throw(BoundsError())
+getindex(c::Char, I::Integer...) = all(Predicate(x -> x == 1), I) ? c : throw(BoundsError())
 first(c::Char) = c
 last(c::Char) = c
 eltype(::Type{Char}) = Char
@@ -30,21 +30,19 @@ isempty(c::Char) = false
 in(x::Char, y::Char) = x == y
 
 ==(x::Char, y::Char) = UInt32(x) == UInt32(y)
-==(x::Char, y::Integer) = UInt32(x) == y
-==(x::Integer, y::Char) = x == UInt32(y)
+isless(x::Char, y::Char) = UInt32(x) < UInt32(y)
 
-isless(x::Char, y::Char)    = isless(UInt32(x), UInt32(y))
-isless(x::Char, y::Integer) = isless(UInt32(x), y)
-isless(x::Integer, y::Char) = isless(x, UInt32(y))
+const hashchar_seed = 0xd4d64234
+hash(x::Char, h::UInt) = hash_uint64(((UInt64(x)+hashchar_seed)<<32) $ UInt64(h))
 
 -(x::Char, y::Char) = Int(x) - Int(y)
 -(x::Char, y::Integer) = Char(Int32(x) - Int32(y))
 +(x::Char, y::Integer) = Char(Int32(x) + Int32(y))
 +(x::Integer, y::Char) = y + x
 
-Base.promote_op{I<:Integer}(::Base.SubFun, ::Type{Char}, ::Type{I}) = Char
-Base.promote_op{I<:Integer}(::Base.AddFun, ::Type{Char}, ::Type{I}) = Char
-Base.promote_op{I<:Integer}(::Base.AddFun, ::Type{I}, ::Type{Char}) = Char
+Base.promote_op{I<:Integer}(::typeof(-), ::Type{Char}, ::Type{I}) = Char
+Base.promote_op{I<:Integer}(::typeof(+), ::Type{Char}, ::Type{I}) = Char
+Base.promote_op{I<:Integer}(::typeof(+), ::Type{I}, ::Type{Char}) = Char
 
 bswap(x::Char) = Char(bswap(UInt32(x)))
 

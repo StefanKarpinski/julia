@@ -46,8 +46,8 @@ end
 #   "Fast Half Float Conversion" by Jeroen van der Zijp
 #   ftp://ftp.fox-toolkit.org/pub/fasthalffloatconversion.pdf
 
-const basetable = Array(UInt16, 512)
-const shifttable = Array(UInt8, 512)
+const basetable = Array{UInt16}(512)
+const shifttable = Array{UInt8}(512)
 
 for i = 0:255
     e = i - 127
@@ -165,6 +165,7 @@ ldexp(a::Float16, b::Integer) = Float16(ldexp(Float32(a), b))
 rationalize{T<:Integer}(::Type{T}, x::Float16; tol::Real=eps(x)) = rationalize(T, Float32(x); tol=tol)
 
 reinterpret(::Type{Unsigned}, x::Float16) = reinterpret(UInt16,x)
+reinterpret(::Type{Signed}, x::Float16) = reinterpret(Int16,x)
 
 sign_mask(::Type{Float16}) =        0x8000
 exponent_mask(::Type{Float16}) =    0x7c00

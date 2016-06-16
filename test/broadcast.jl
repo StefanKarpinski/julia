@@ -1,5 +1,58 @@
 # This file is a part of Julia. License is MIT: http://julialang.org/license
 
+module TestBroadcastInternals
+
+using Base.Broadcast: broadcast_shape, check_broadcast_shape, newindex, _bcs, _bcsm
+using Base.Test
+
+@test @inferred(_bcs((), (3,5), (3,5))) == (3,5)
+@test @inferred(_bcs((), (3,1), (3,5))) == (3,5)
+@test @inferred(_bcs((), (3,),  (3,5))) == (3,5)
+@test @inferred(_bcs((), (3,5), (3,)))  == (3,5)
+@test_throws DimensionMismatch _bcs((), (3,5), (4,5))
+@test_throws DimensionMismatch _bcs((), (3,5), (3,4))
+@test @inferred(_bcs((), (-1:1, 2:5), (-1:1, 2:5))) == (-1:1, 2:5)
+@test @inferred(_bcs((), (-1:1, 2:5), (1, 2:5)))    == (-1:1, 2:5)
+@test @inferred(_bcs((), (-1:1, 1),   (1, 2:5)))    == (-1:1, 2:5)
+@test @inferred(_bcs((), (-1:1,),     (-1:1, 2:5))) == (-1:1, 2:5)
+@test_throws DimensionMismatch _bcs((), (-1:1, 2:6), (-1:1, 2:5))
+@test_throws DimensionMismatch _bcs((), (-1:1, 2:5), (2, 2:5))
+
+@test @inferred(broadcast_shape(zeros(3,4), zeros(3,4))) == (3,4)
+@test @inferred(broadcast_shape(zeros(3,4), zeros(3)))   == (3,4)
+@test @inferred(broadcast_shape(zeros(3),   zeros(3,4))) == (3,4)
+@test @inferred(broadcast_shape(zeros(3), zeros(1,4), zeros(1))) == (3,4)
+
+check_broadcast_shape((3,5), zeros(3,5))
+check_broadcast_shape((3,5), zeros(3,1))
+check_broadcast_shape((3,5), zeros(3))
+check_broadcast_shape((3,5), zeros(3,5), zeros(3))
+check_broadcast_shape((3,5), zeros(3,5), 1)
+check_broadcast_shape((3,5), 5, 2)
+@test_throws DimensionMismatch check_broadcast_shape((3,5), zeros(2,5))
+@test_throws DimensionMismatch check_broadcast_shape((3,5), zeros(3,4))
+@test_throws DimensionMismatch check_broadcast_shape((3,5), zeros(3,4,2))
+@test_throws DimensionMismatch check_broadcast_shape((3,5), zeros(3,5), zeros(2))
+
+check_broadcast_shape((-1:1, 6:9), (-1:1, 6:9))
+check_broadcast_shape((-1:1, 6:9), (-1:1, 1))
+check_broadcast_shape((-1:1, 6:9), (1, 6:9))
+@test_throws DimensionMismatch check_broadcast_shape((-1:1, 6:9), (-1, 6:9))
+@test_throws DimensionMismatch check_broadcast_shape((-1:1, 6:9), (-1:1, 6))
+check_broadcast_shape((-1:1, 6:9), 1)
+check_broadcast_shape((-1:1, 6:9), zeros(1,1))
+
+ci(x) = CartesianIndex(x)
+@test @inferred(newindex(ci((2,2)), (true, true)))   == ci((2,2))
+@test @inferred(newindex(ci((2,2)), (true, false)))  == ci((2,1))
+@test @inferred(newindex(ci((2,2)), (false, true)))  == ci((1,2))
+@test @inferred(newindex(ci((2,2)), (false, false))) == ci((1,1))
+@test @inferred(newindex(ci((2,2)), (true,)))   == ci((2,))
+@test @inferred(newindex(ci((2,2)), (false,))) == ci((1,))
+@test @inferred(newindex(ci((2,2)), ())) == 1
+
+end
+
 function as_sub(x::AbstractVector)
     y = similar(x, eltype(x), tuple(([size(x)...]*2)...))
     y = sub(y, 2:2:length(y))
@@ -29,7 +82,7 @@ function as_sub{T}(x::AbstractArray{T,3})
     y
 end
 
-bittest(f::Function, ewf::Function, a...) = (@test ewf(a...) == bitpack(broadcast(f, a...)))
+bittest(f::Function, ewf::Function, a...) = (@test ewf(a...) == BitArray(broadcast(f, a...)))
 n1 = 21
 n2 = 32
 n3 = 17
@@ -61,9 +114,9 @@ for arr in (identity, as_sub)
     @test arr([1 2]) ./ arr([3, 4]) == [1/3 2/3; 1/4 2/4]
     @test arr([1 2]) .\ arr([3, 4]) == [3 1.5; 4 2]
     @test arr([3 4]) .^ arr([1, 2]) == [3 4; 9 16]
-    @test arr(bitpack([true false])) .* arr(bitpack([true, true])) == [true false; true false]
-    @test arr(bitpack([true false])) .^ arr(bitpack([false, true])) == [true true; true false]
-    @test arr(bitpack([true false])) .^ arr([0, 3]) == [true true; true false]
+    @test arr(BitArray([true false])) .* arr(BitArray([true, true])) == [true false; true false]
+    @test arr(BitArray([true false])) .^ arr(BitArray([false, true])) == [true true; true false]
+    @test arr(BitArray([true false])) .^ arr([0, 3]) == [true true; true false]
 
     M = arr([11 12; 21 22])
     @test broadcast_getindex(M, eye(Int, 2).+1,arr([1, 2])) == [21 11; 12 22]
@@ -116,3 +169,30 @@ rt = Base.return_types(broadcast, Tuple{Function, Array{Float64, 3}, Array{Int, 
 @test length(rt) == 1 && rt[1] == Array{Float64, 3}
 rt = Base.return_types(broadcast!, Tuple{Function, Array{Float64, 3}, Array{Float64, 3}, Array{Int, 1}})
 @test length(rt) == 1 && rt[1] == Array{Float64, 3}
+
+# f.(args...) syntax (#15032)
+let x = [1,3.2,4.7], y = [3.5, pi, 1e-4], α = 0.2342
+    @test sin.(x) == broadcast(sin, x)
+    @test sin.(α) == broadcast(sin, α)
+    @test factorial.(3) == broadcast(factorial, 3)
+    @test atan2.(x, y) == broadcast(atan2, x, y)
+    @test atan2.(x, y') == broadcast(atan2, x, y')
+    @test atan2.(x, α) == broadcast(atan2, x, α)
+    @test atan2.(α, y') == broadcast(atan2, α, y')
+end
+
+# issue 14725
+let a = Number[2, 2.0, 4//2, 2+0im] / 2
+    @test eltype(a) == Number
+end
+let a = Real[2, 2.0, 4//2] / 2
+    @test eltype(a) == Real
+end
+let a = Real[2, 2.0, 4//2] / 2.0
+    @test eltype(a) == Real
+end
+
+# issue 16164
+let a = broadcast(Float32, [3, 4, 5])
+    @test eltype(a) == Float32
+end

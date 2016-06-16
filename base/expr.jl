@@ -2,22 +2,14 @@
 
 ## symbols ##
 
-symbol(s::Symbol) = s
-symbol(s::ASCIIString) = symbol(s.data)
-symbol(s::UTF8String) = symbol(s.data)
-symbol(a::Array{UInt8,1}) =
-    ccall(:jl_symbol_n, Any, (Ptr{UInt8}, Int32), a, length(a))::Symbol
-symbol(x...) = symbol(string(x...))
+gensym() = ccall(:jl_gensym, Ref{Symbol}, ())
 
-gensym() = ccall(:jl_gensym, Any, ())::Symbol
-
-gensym(s::ASCIIString) = gensym(s.data)
-gensym(s::UTF8String) = gensym(s.data)
+gensym(s::String) = gensym(s.data)
 gensym(a::Array{UInt8,1}) =
-    ccall(:jl_tagged_gensym, Any, (Ptr{UInt8}, Int32), a, length(a))::Symbol
-gensym(ss::Union{ASCIIString, UTF8String}...) = map(gensym, ss)
+    ccall(:jl_tagged_gensym, Ref{Symbol}, (Ptr{UInt8}, Int32), a, length(a))
+gensym(ss::String...) = map(gensym, ss)
 gensym(s::Symbol) =
-    ccall(:jl_tagged_gensym, Any, (Ptr{UInt8}, Int32), s, ccall(:strlen, Csize_t, (Ptr{UInt8},), s))::Symbol
+    ccall(:jl_tagged_gensym, Ref{Symbol}, (Ptr{UInt8}, Int32), s, ccall(:strlen, Csize_t, (Ptr{UInt8},), s))
 
 macro gensym(names...)
     blk = Expr(:block)
@@ -30,24 +22,21 @@ end
 
 ## expressions ##
 
-splicedexpr(hd::Symbol, args::Array{Any,1}) = (e=Expr(hd); e.args=args; e)
 copy(e::Expr) = (n = Expr(e.head);
-                 n.args = astcopy(e.args);
+                 n.args = copy_exprargs(e.args);
                  n.typ = e.typ;
                  n)
-copy(s::Slot) = Slot(s.id, s.typ)
 
 # copy parts of an AST that the compiler mutates
-astcopy(x::Union{Slot,Expr}) = copy(x)
-astcopy(x::Array{Any,1}) = Any[astcopy(a) for a in x]
-astcopy(x) = x
+copy_exprs(x::Expr) = copy(x)
+copy_exprs(x::ANY) = x
+copy_exprargs(x::Array{Any,1}) = Any[copy_exprs(a) for a in x]
 
-==(x::Expr, y::Expr) = x.head === y.head && x.args == y.args
-==(x::QuoteNode, y::QuoteNode) = x.value == y.value
-==(x::Slot, y::Slot) = x.id === y.id && x.typ === y.typ
+==(x::Expr, y::Expr) = x.head === y.head && isequal(x.args, y.args)
+==(x::QuoteNode, y::QuoteNode) = isequal(x.value, y.value)
 
-expand(x) = ccall(:jl_expand, Any, (Any,), x)
-macroexpand(x) = ccall(:jl_macroexpand, Any, (Any,), x)
+expand(x::ANY) = ccall(:jl_expand, Any, (Any,), x)
+macroexpand(x::ANY) = ccall(:jl_macroexpand, Any, (Any,), x)
 
 ## misc syntax ##
 
@@ -82,6 +71,13 @@ macro propagate_inbounds(ex)
     end
 end
 
+"""
+Tells the compiler to apply the polyhedral optimizer Polly to a function.
+"""
+macro polly(ex)
+    esc(isa(ex, Expr) ? pushmeta!(ex, :polly) : ex)
+end
+
 ## some macro utilities ##
 
 find_vars(e) = find_vars(e, [])
@@ -94,7 +90,7 @@ function find_vars(e, lst)
                 push!(lst, e)
             end
         end
-    elseif isa(e,Expr) && e.head !== :quote && e.head !== :top
+    elseif isa(e,Expr) && e.head !== :quote && e.head !== :top && e.head !== :core
         for x in e.args
             find_vars(x,lst)
         end
@@ -121,9 +117,9 @@ function pushmeta!(ex::Expr, sym::Symbol, args::Any...)
     else
         tag = Expr(sym, args...)
     end
-    found, metaex = findmeta(ex)
-    if found
-        push!(metaex.args, tag)
+    idx, exargs = findmeta(ex)
+    if idx != 0
+        push!(exargs[idx].args, tag)
     else
         body::Expr = ex.args[2]
         unshift!(body.args, Expr(:meta, tag))
@@ -133,27 +129,29 @@ end
 
 function popmeta!(body::Expr, sym::Symbol)
     body.head == :block || return false, []
-    found, metaex = findmeta_block(body.args)
-    if !found
+    popmeta!(body.args, sym)
+end
+popmeta!(arg, sym) = (false, [])
+function popmeta!(body::Array{Any,1}, sym::Symbol)
+    idx, args = findmeta_block(body)
+    if idx == 0
         return false, []
     end
+    metaex = args[idx]
     metaargs = metaex.args
     for i = 1:length(metaargs)
         if isa(metaargs[i], Symbol) && (metaargs[i]::Symbol) == sym
             deleteat!(metaargs, i)
+            isempty(metaargs) && deleteat!(args, idx)
             return true, []
         elseif isa(metaargs[i], Expr) && (metaargs[i]::Expr).head == sym
             ret = (metaargs[i]::Expr).args
             deleteat!(metaargs, i)
+            isempty(metaargs) && deleteat!(args, idx)
             return true, ret
         end
     end
     false, []
-end
-popmeta!(arg, sym) = (false, [])
-function popmeta!(body::Array{Any,1}, sym::Symbol)
-    ex = Expr(:block); ex.args = body
-    popmeta!(ex, sym)
 end
 
 function findmeta(ex::Expr)
@@ -168,19 +166,20 @@ end
 findmeta(ex::Array{Any,1}) = findmeta_block(ex)
 
 function findmeta_block(exargs)
-    for a in exargs
+    for i = 1:length(exargs)
+        a = exargs[i]
         if isa(a, Expr)
             if (a::Expr).head == :meta
-                return true, a::Expr
+                return i, exargs
             elseif (a::Expr).head == :block
-                found, exb = findmeta_block(a.args)
-                if found
-                    return found, exb
+                idx, exa = findmeta_block(a.args)
+                if idx != 0
+                    return idx, exa
                 end
             end
         end
     end
-    return false, Expr(:block)
+    return 0, []
 end
 
 remove_linenums!(ex) = ex

@@ -37,6 +37,7 @@ test_have_color(buf, "", "")
 method_c2(x::Int32, args...) = true
 method_c2(x::Int32, y::Float64, args...) = true
 method_c2(x::Int32, y::Float64) = true
+method_c2(x::Int32, y::Int32, z::Int32) = true
 method_c2{T<:Real}(x::T, y::T, z::T) = true
 
 Base.show_method_candidates(buf, Base.MethodError(method_c2,(1., 1., 2)))
@@ -69,14 +70,27 @@ for f in [getindex, setindex!]
     test_have_color(buf, "", "")
 end
 
+type PR16155
+    a::Int64
+    b
+end
+
+Base.show_method_candidates(buf, MethodError(PR16155,(1.0, 2.0, Int64(3))))
+test_have_color(buf, "\e[0m\nClosest candidates are:\n  PR16155(::Any, ::Any)\n  PR16155(\e[1m\e[31m::Int64\e[0m, ::Any)\n  PR16155{T}(::Any)\e[0m",
+                     "\nClosest candidates are:\n  PR16155(::Any, ::Any)\n  PR16155(!Matched::Int64, ::Any)\n  PR16155{T}(::Any)")
+
+Base.show_method_candidates(buf, MethodError(PR16155,(Int64(3), 2.0, Int64(3))))
+test_have_color(buf, "\e[0m\nClosest candidates are:\n  PR16155(::Int64, ::Any)\n  PR16155(::Any, ::Any)\n  PR16155{T}(::Any)\e[0m",
+                     "\nClosest candidates are:\n  PR16155(::Int64, ::Any)\n  PR16155(::Any, ::Any)\n  PR16155{T}(::Any)")
+
 macro except_str(expr, err_type)
     return quote
-        let
-            local err
+        let err = nothing
             try
                 $(esc(expr))
             catch err
             end
+            err === nothing && error("expected failure, but no exception thrown")
             @test typeof(err) === $(esc(err_type))
             buff = IOBuffer()
             showerror(buff, err)
@@ -87,12 +101,12 @@ end
 
 macro except_strbt(expr, err_type)
     return quote
-        let
-            local err
+        let err = nothing
             try
                 $(esc(expr))
             catch err
             end
+            err === nothing && error("expected failure, but no exception thrown")
             @test typeof(err) === $(esc(err_type))
             buff = IOBuffer()
             showerror(buff, err, catch_backtrace())
@@ -103,14 +117,15 @@ end
 
 macro except_stackframe(expr, err_type)
     return quote
-       let
+       let err = nothing
            local st
            try
                $(esc(expr))
            catch err
                st = catch_stacktrace()
-               @test typeof(err) === $(esc(err_type))
            end
+           err === nothing && error("expected failure, but no exception thrown")
+           @test typeof(err) === $(esc(err_type))
            sprint(show, st[1])
        end
     end
@@ -170,9 +185,9 @@ let undefvar
     @test contains(err_str, "Exponentiation yielding a complex result requires a complex argument")
 
     err_str = @except_str [5,4,3][-2,1] BoundsError
-    @test err_str == "BoundsError: attempt to access 3-element Array{$Int,1}:\n 5\n 4\n 3\n  at index [-2,1]"
+    @test err_str == "BoundsError: attempt to access 3-element Array{$Int,1} at index [-2,1]"
     err_str = @except_str [5,4,3][1:5] BoundsError
-    @test err_str == "BoundsError: attempt to access 3-element Array{$Int,1}:\n 5\n 4\n 3\n  at index [1:5]"
+    @test err_str == "BoundsError: attempt to access 3-element Array{$Int,1} at index [1:5]"
 
     err_str = @except_str 0::Bool TypeError
     @test err_str == "TypeError: non-boolean ($Int) used in boolean context"
@@ -181,11 +196,11 @@ let undefvar
     err_str = @except_str 0::7 TypeError
     @test err_str == "TypeError: typeassert: expected Type{T}, got $Int"
     err_str = @except_str "" <: AbstractString TypeError
-    @test err_str == "TypeError: subtype: expected Type{T}, got ASCIIString"
+    @test err_str == "TypeError: subtype: expected Type{T}, got String"
     err_str = @except_str AbstractString <: "" TypeError
-    @test err_str == "TypeError: subtype: expected Type{T}, got ASCIIString"
+    @test err_str == "TypeError: subtype: expected Type{T}, got String"
     err_str = @except_str Type{""} TypeError
-    @test err_str == "TypeError: Type: in parameter, expected Type{T}, got ASCIIString"
+    @test err_str == "TypeError: Type: in parameter, expected Type{T}, got String"
     err_str = @except_str TypeWithIntParam{Any} TypeError
     @test err_str == "TypeError: TypeWithIntParam: in T, expected T<:Integer, got Type{Any}"
 
@@ -198,7 +213,7 @@ let undefvar
     err_str = @except_str read(IOBuffer(), UInt8) EOFError
     @test err_str == "EOFError: read end of file"
     err_str = @except_str Dict()[:doesnotexist] KeyError
-    @test err_str == "KeyError: doesnotexist not found"
+    @test err_str == "KeyError: key :doesnotexist not found"
     err_str = @except_str throw(InterruptException()) InterruptException
     @test err_str == "InterruptException:"
     err_str = @except_str throw(ArgumentError("not an error")) ArgumentError
@@ -225,8 +240,8 @@ let err_str,
     i = reinterpret(EightBitType, 0x54),
     j = reinterpret(EightBitTypeT{Int32}, 0x54)
 
-    err_str = @except_str Symbol() MethodError
-    @test contains(err_str, "MethodError: no method matching Symbol()")
+    err_str = @except_str Bool() MethodError
+    @test contains(err_str, "MethodError: no method matching Bool()")
     err_str = @except_str :a() MethodError
     @test contains(err_str, "MethodError: objects of type Symbol are not callable")
     err_str = @except_str EightBitType() MethodError
@@ -248,9 +263,9 @@ let err_str,
     @test contains(err_str, "MethodError: objects of type Array{Float64,1} are not callable")
 end
 @test stringmime("text/plain", FunctionLike()) == "(::FunctionLike) (generic function with 0 methods)"
-@test ismatch(r"^@doc \(macro with \d+ method[s]?\)$", stringmime("text/plain", Base.(symbol("@doc"))))
+@test ismatch(r"^@doc \(macro with \d+ method[s]?\)$", stringmime("text/plain", getfield(Base, Symbol("@doc"))))
 
-method_defs_lineno = @__LINE__
+method_defs_lineno = @__LINE__+1
 Base.Symbol() = throw(ErrorException("1"))
 (::Symbol)() = throw(ErrorException("2"))
 EightBitType() = throw(ErrorException("3"))
@@ -271,10 +286,10 @@ let err_str,
     @test sprint(show, which(:a, Tuple{})) == "(::Symbol)() at $sp:$(method_defs_lineno + 1)"
     @test sprint(show, which(EightBitType, Tuple{})) == "EightBitType() at $sp:$(method_defs_lineno + 2)"
     @test sprint(show, which(reinterpret(EightBitType, 0x54), Tuple{})) == "(::EightBitType)() at $sp:$(method_defs_lineno + 3)"
-    @test sprint(show, which(EightBitTypeT, Tuple{})) == "(::Type{EightBitTypeT{T<:Any}})() at $sp:$(method_defs_lineno + 4)"
+    @test sprint(show, which(EightBitTypeT, Tuple{})) == "(::Type{EightBitTypeT})() at $sp:$(method_defs_lineno + 4)"
     @test sprint(show, which(EightBitTypeT{Int32}, Tuple{})) == "(::Type{EightBitTypeT{T}}){T}() at $sp:$(method_defs_lineno + 5)"
-    @test sprint(show, which(reinterpret(EightBitTypeT{Int32}, 0x54), Tuple{})) == "(::EightBitTypeT{T<:Any})() at $sp:$(method_defs_lineno + 6)"
-    @test startswith(sprint(show, which(Base.(symbol("@doc")), Tuple{Vararg{Any}})), "@doc(args...) at docs/bootstrap.jl:")
+    @test sprint(show, which(reinterpret(EightBitTypeT{Int32}, 0x54), Tuple{})) == "(::EightBitTypeT)() at $sp:$(method_defs_lineno + 6)"
+    @test startswith(sprint(show, which(getfield(Base, Symbol("@doc")), Tuple{Vararg{Any}})), "@doc(x...) at boot.jl:")
     @test startswith(sprint(show, which(FunctionLike(), Tuple{})), "(::FunctionLike)() at $sp:$(method_defs_lineno + 7)")
     @test stringmime("text/plain", FunctionLike()) == "(::FunctionLike) (generic function with 1 method)"
     @test stringmime("text/plain", Core.arraysize) == "arraysize (built-in function)"
@@ -337,4 +352,18 @@ withenv("JULIA_EDITOR" => nothing, "VISUAL" => nothing, "EDITOR" => nothing) do
     @test Base.editor() == ["/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl", "-w"]
 end
 
+# Issue #14684: `display` should prints associative types in full.
+let d = Dict(1 => 2, 3 => 45)
+    buf = IOContext(IOBuffer(), multiline=true)
+    td = TextDisplay(buf)
+    display(td, d)
+    result = String(td.io.io)
 
+    @test contains(result, summary(d))
+
+    # Is every pair in the string?
+    # Compare by removing spaces
+    for el in d
+        @test contains(replace(result, " ", ""), string(el))
+    end
+end

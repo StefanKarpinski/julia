@@ -119,7 +119,7 @@ function convert(::Type{UTF16String}, str::AbstractString)
     UTF16String(buf)
 end
 
-function convert(::Type{UTF16String}, str::UTF8String)
+function convert(::Type{UTF16String}, str::String)
     dat = str.data
     # handle zero length string quickly
     sizeof(dat) == 0 && return empty_utf16
@@ -156,14 +156,14 @@ function convert(::Type{UTF16String}, str::UTF8String)
     UTF16String(buf)
 end
 
-function convert(::Type{UTF8String}, str::UTF16String)
+function convert(::Type{String}, str::UTF16String)
     dat = str.data
     len = sizeof(dat) >>> 1
     # handle zero length string quickly
     len <= 1 && return empty_utf8
     # get number of bytes to allocate
     len, flags, num4byte, num3byte, num2byte = unsafe_checkstring(dat, 1, len-1)
-    flags == 0 && @inbounds return UTF8String(copy!(Vector{UInt8}(len), 1, dat, 1, len))
+    flags == 0 && @inbounds return String(copy!(Vector{UInt8}(len), 1, dat, 1, len))
     return encode_to_utf8(UInt16, dat, len + num2byte + num3byte*2 + num4byte*3)
 end
 
@@ -196,11 +196,6 @@ function encode_to_utf16(dat, len)
     UTF16String(buf)
 end
 
-function convert(::Type{UTF16String}, str::ASCIIString)
-    dat = str.data
-    @inbounds return fast_utf_copy(UTF16String, UInt16, length(dat), dat, true)
-end
-
 convert(::Type{Vector{UInt16}}, str::UTF16String) = str.data
 convert(::Type{Array{UInt16}},  str::UTF16String) = str.data
 
@@ -226,15 +221,15 @@ function convert(T::Type{UTF16String}, bytes::AbstractArray{UInt8})
     data = reinterpret(UInt16, bytes)
     # check for byte-order mark (BOM):
     if data[1] == 0xfeff        # native byte order
-        d = Array(UInt16, length(data))
+        d = Array{UInt16}(length(data))
         copy!(d,1, data,2, length(data)-1)
     elseif data[1] == 0xfffe    # byte-swapped
-        d = Array(UInt16, length(data))
+        d = Array{UInt16}(length(data))
         for i = 2:length(data)
             d[i-1] = bswap(data[i])
         end
     else
-        d = Array(UInt16, length(data) + 1)
+        d = Array{UInt16}(length(data) + 1)
         copy!(d,1, data,1, length(data)) # assume native byte order
     end
     d[end] = 0 # NULL terminate
@@ -243,7 +238,7 @@ function convert(T::Type{UTF16String}, bytes::AbstractArray{UInt8})
 end
 
 utf16(x) = convert(UTF16String, x)
-utf16(p::Ptr{UInt16}, len::Integer) = utf16(pointer_to_array(p, len))
+utf16(p::Ptr{UInt16}, len::Integer) = utf16(unsafe_wrap(Array, p, len))
 utf16(p::Ptr{Int16}, len::Integer) = utf16(convert(Ptr{UInt16}, p), len)
 function utf16(p::Union{Ptr{UInt16}, Ptr{Int16}})
     len = 0
