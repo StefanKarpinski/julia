@@ -270,3 +270,5 @@ function map(fun, str::UTF16String)
     push!(buf, 0)
     UTF16String(buf)
 end
+
+cconvert(::Type{Cwstring}, v::Vector{UInt16}) = transcode(Cwchar_t, v)

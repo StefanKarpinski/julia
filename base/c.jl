@@ -81,7 +81,7 @@ unsafe_string(s::Cstring) = unsafe_string(convert(Ptr{UInt8}, s))
 
 # convert strings to String etc. to pass as pointers
 cconvert(::Type{Cstring}, s::AbstractString) = String(s)
-cconvert(::Type{Cwstring}, s::AbstractString) = wstring(s)
+cconvert(::Type{Cwstring}, s::AbstractString) = transcode(Cwchar_t, String(s).data)
 
 containsnul(p::Ptr, len) =
     C_NULL != ccall(:memchr, Ptr{Cchar}, (Ptr{Cchar}, Cint, Csize_t), p, 0, len)
@@ -96,10 +96,15 @@ function unsafe_convert(::Type{Cstring}, s::String)
     return Cstring(p)
 end
 
+function unsafe_convert(::Type{Cwstring}, s::Vector{Cwchar_t})
+    if 0 in s
+        throw(ArgumentError("embedded NULs are not allowed in C strings: $(repr(s))"))
+    end
+    return Cwstring(s)
+end
+
 # symbols are guaranteed not to contain embedded NUL
 convert(::Type{Cstring}, s::Symbol) = Cstring(unsafe_convert(Ptr{Cchar}, s))
-
-# in string.jl: unsafe_convert(::Type{Cwstring}, s::WString)
 
 # FIXME: this should be handled by implicit conversion to Cwstring, but good luck with that
 if is_windows()
